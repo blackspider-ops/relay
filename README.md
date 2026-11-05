@@ -36,11 +36,22 @@ npx --yes relay-codex run
 
 ```sh
 relay run -- resume --yolo
+relay run -- -C ~/projects/website resume
+relay run -- exec --json "Review this project"
 relay status --watch
 ```
 
 `--yolo` keeps its usual full-access meaning. Without it, Relay keeps the task's
-permissions. Different terminals can work on different conversations at once.
+permissions. Resume starts with sessions from your current folder, just like
+`codex resume`. Add `--all` to browse every folder, or `-C PATH` to choose a folder.
+Different terminals can work on different conversations at once.
+
+Put native Codex commands and options after `relay run --`. Interactive sessions,
+`resume`, and `fork` use Relay recovery. Other commands run native Codex with your
+normal Codex login. Native-only launch settings (`-p/--profile`, `--add-dir`,
+`--worktree`, `--oss`, `--local-provider`, `--remote`, and
+`--dangerously-bypass-hook-trust`) also run directly without account recovery.
+Relay announces this in the terminal rather than ignoring those settings.
 
 If a conversation is already open in another app, close it there before resuming
 it here, or use Codex's `fork` command for a separate copy. To move a Relay task

@@ -23,7 +23,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate
 import settings
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -174,10 +174,9 @@ class RPC:
             binary,
             "app-server",
             "--stdio",
-            "-c",
-            f'cli_auth_credentials_store="{mode}"',
         ]
         cmd.extend(extra_args or [])
+        cmd += ["-c", f'cli_auth_credentials_store="{mode}"']
         if helper:
             cmd += ["-c", "features.secret_auth_storage=false"]
         else:
@@ -1636,12 +1635,17 @@ class Controller:
 async def run_pool(args, state, binary):
     import service
 
-    settings.load(state, os.getcwd(), args.profile)
-    frontend, overrides = translate(args.codex_args)
+    from launch import frontend_arguments, working_directory
+
+    invocation_cwd = os.getcwd()
+    cwd = working_directory(args.codex_args, invocation_cwd)
+    settings.load(state, cwd, args.profile)
+    arguments = frontend_arguments(args.codex_args, invocation_cwd)
+    frontend, overrides = translate(arguments)
     target = resume_target(
         frontend,
         Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")),
-        os.getcwd(),
+        cwd,
     )
     pool = Pool(state)
     try:
@@ -1652,27 +1656,29 @@ async def run_pool(args, state, binary):
         print(
             "Reconnecting to existing wrapper session " + owner[:10] + ".", flush=True
         )
-        return await service.attach(state, owner, binary, frontend, wait_forever=True)
+        return await service.attach(
+            state, owner, binary, arguments, wait_forever=True, cwd=invocation_cwd
+        )
     ident = service.start(
         state,
-        name=args.name or Path.cwd().name,
-        cwd=os.getcwd(),
+        name=args.name or Path(cwd).name,
+        cwd=cwd,
         first=args.first,
-        arguments=args.codex_args,
+        arguments=arguments,
         profile=args.profile,
         interactive=True,
         binary=binary,
     )
     try:
         return await service.attach(
-            state, ident, binary, frontend or [], wait_forever=True
+            state, ident, binary, arguments, wait_forever=True, cwd=invocation_cwd
         )
     finally:
         # A foreground launch normally closes its worker after the terminal exits.
         # Background mode and explicit takeover preserve the supervised worker.
         spec_path = service.folder(state) / (ident + ".job.json")
         spec = json.loads(spec_path.read_text()) if spec_path.exists() else {}
-        current_preferences = settings.load(state, os.getcwd(), args.profile)
+        current_preferences = settings.load(state, cwd, args.profile)
         if not current_preferences.get("background_on_disconnect") and not spec.get(
             "takeover"
         ):
@@ -1687,15 +1693,21 @@ async def run_pool(args, state, binary):
 
 
 def resume_target(arguments, home, cwd):
-    if "resume" not in arguments:
+    from launch import tokens
+
+    parsed = list(tokens(arguments))
+    positionals = [
+        value for name, value, raw in parsed if name is None and len(raw) == 1
+    ]
+    if not positionals or positionals[0] != "resume":
         return None
-    index = arguments.index("resume")
-    for item in arguments[index + 1 :]:
+    if len(positionals) > 1:
         try:
-            return str(uuid.UUID(item))
+            return str(uuid.UUID(positionals[1]))
         except (ValueError, AttributeError):
-            pass
-    if "--last" not in arguments:
+            return None
+    flags = {name for name, _, _ in parsed}
+    if "--last" not in flags:
         return None
     database = home / "state_5.sqlite"
     if not database.exists():
@@ -1705,7 +1717,7 @@ def resume_target(arguments, home, cwd):
     try:
         db = sqlite3.connect("file:" + str(database) + "?mode=ro", uri=True)
         try:
-            if "--all" in arguments:
+            if "--all" in flags:
                 row = db.execute(
                     "SELECT id FROM threads WHERE archived=0 ORDER BY updated_at DESC LIMIT 1"
                 ).fetchone()
@@ -1832,6 +1844,20 @@ def parser():
 
 async def dispatch(args, state, binary):
     import commands
+
+    if args.command == "run":
+        from launch import arguments_only, native_mode
+
+        if native_mode(args.codex_args):
+            if sys.stderr.isatty():
+                print(
+                    "Running native Codex; automatic account recovery is inactive for this mode.",
+                    file=sys.stderr,
+                )
+            process = await asyncio.create_subprocess_exec(
+                binary, *arguments_only(args.codex_args)
+            )
+            return await process.wait()
 
     if args.command == "_broker":
         import broker

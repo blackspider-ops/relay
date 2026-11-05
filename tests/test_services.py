@@ -396,6 +396,12 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 await service.attach(self.state, self.ident, "/new/global/codex"), 0
             )
             self.assertEqual(spawn.call_args.args[0], self.binary)
+            expected_cwd = json.loads(self.meta.read_text())["cwd"]
+            argv = spawn.call_args.args
+            self.assertEqual(
+                argv[argv.index("-C") + 1], str(Path(expected_cwd).resolve())
+            )
+            self.assertEqual(spawn.call_args.kwargs["cwd"], expected_cwd)
 
     async def test_takeover_rotates_capability_and_old_frontend_cannot_reconnect(self):
         from websockets.asyncio.client import connect

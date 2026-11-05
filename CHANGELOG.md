@@ -1,5 +1,13 @@
 # Changes
 
+## 0.4.2
+
+- Default the resume picker to the current project; honor explicit working directories.
+- Preserve option values, attached short options, prompt separators, and relative image paths.
+- Forward native utility commands and native-only launch settings without a remote connection.
+- Support automatic approval review and private-server launches in managed sessions.
+- Keep pooled authentication in memory even when native config overrides are supplied.
+
 ## 0.4.1
 
 - Keep manual review required after a worker crash during an external action.

@@ -137,7 +137,7 @@ async def supervise(state, ident):
 
 
 async def attach(
-    state, prefix, binary, arguments=None, wait_forever=False, takeover=False
+    state, prefix, binary, arguments=None, wait_forever=False, takeover=False, cwd=None
 ):
     from router import RouterError, clean_env
 
@@ -191,8 +191,10 @@ async def attach(
     args = arguments or ["resume", value["thread"]]
     if not arguments and not value.get("thread"):
         args = []
-    from launch import translate
+    from launch import translate, frontend_arguments
 
+    invocation_cwd = cwd or value.get("cwd") or os.getcwd()
+    args = frontend_arguments(args, invocation_cwd)
     args, overrides = translate(args)
     if overrides:
         await send_control(state, ident, "permissions", overrides)
@@ -208,7 +210,7 @@ async def attach(
         "RELAY_TRANSPORT_TOKEN",
         *args,
         env=env,
-        cwd=value.get("cwd") or None,
+        cwd=invocation_cwd,
     )
     waiter = asyncio.create_task(proc.wait())
     try:
@@ -253,7 +255,11 @@ def headless_options(args, cwd):
     i = 0
     while i < len(frontend):
         arg = frontend[i]
-        if arg in ("-m", "--model", "-C", "--cd", "-c", "--config", "-p", "--profile"):
+        if arg in ("-p", "--profile") or arg.startswith("--profile="):
+            raise ValueError(
+                "Native profiles need an interactive launch: relay run -- -p PROFILE"
+            )
+        if arg in ("-m", "--model", "-C", "--cd", "-c", "--config"):
             if i + 1 == len(frontend):
                 raise ValueError(arg + " requires a value")
             value = frontend[i + 1]

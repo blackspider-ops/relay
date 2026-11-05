@@ -41,6 +41,16 @@ relay stop SESSION_ID
 relay restart SESSION_ID
 ```
 
+`relay run --` accepts native Codex arguments. The resume picker defaults to the
+current folder; `--all` shows every folder and `-C/--cd` chooses another working
+folder. Relative image paths keep the terminal's original directory as their base.
+
+Recovery manages interactive sessions, `resume`, and `fork`. Native utilities
+(such as `exec`, `review`, `login`, and `mcp`) run directly, as do native profiles,
+extra writable directories, worktrees, local providers, explicit remote servers,
+and the hook-trust bypass. These modes keep native behavior and use your normal
+Codex login, without Relay account recovery.
+
 Session IDs can be shortened as long as the prefix is unique. `pause` pauses
 automatic recovery; it lets a command already running finish. `retry` explicitly
 overrides the retry timer. Switching waits for an idle task; it does not interrupt

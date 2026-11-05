@@ -8,8 +8,8 @@ Friends can run `npx relay-codex` or install it with `npm install -g relay-codex
 The GitHub repository is enough for friends to install or try Relay:
 
 ```sh
-npm install -g github:blackspider-ops/relay#v0.4.1
-npx --yes github:blackspider-ops/relay#v0.4.1 --version
+npm install -g github:blackspider-ops/relay#v0.4.2
+npx --yes github:blackspider-ops/relay#v0.4.2 --version
 ```
 
 `npx` runs packages. It is not a separate publishing service. Publishing the

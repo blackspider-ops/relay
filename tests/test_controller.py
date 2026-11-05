@@ -33,12 +33,12 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(args, ["resume", "--", "--yolo"])
         self.assertEqual(value, {})
 
-    def test_config_profile_forwarded_to_backend(self):
+    def test_config_forwarded_without_native_only_profile_flag(self):
         self.assertEqual(
             backend_arguments(
                 ["resume", "-p", "work", "-c", 'model_reasoning_effort="high"']
             ),
-            ["-p", "work", "-c", 'model_reasoning_effort="high"'],
+            ["-c", 'model_reasoning_effort="high"'],
         )
 
     def test_setup_supports_one_or_arbitrary_count(self):
