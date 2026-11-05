@@ -186,6 +186,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func makeMenu() -> NSMenu {
         let sessions = current["sessions"] as? [[String: Any]] ?? []
         let accounts = current["accounts"] as? [[String: Any]] ?? []
+        let liveSessions = sessions.filter { $0["running"] as? Bool ?? true }
         let menu = NSMenu(); menu.delegate = self
         menu.autoenablesItems = false
         text("Relay · \(sessions.count) sessions", into: menu)
@@ -195,8 +196,12 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if !actionRunning { action("Dismiss message", args: ["dismiss"], into: menu) }
         }
         if accounts.isEmpty { text("Add an account with relay setup in Terminal.", into: menu) }
+        if liveSessions.isEmpty && !accounts.isEmpty { text("No Relay sessions running. Start with relay run.", into: menu) }
         for account in accounts {
             let name = account["name"] as? String ?? "Account"
+            let accountID = account["id"] as? String ?? ""
+            let assigned = liveSessions.filter { $0["account"] as? String == accountID }
+            let inUse = assigned.isEmpty ? "" : assigned.count == 1 ? " · In use" : " · In use by \(assigned.count) sessions"
             let primary = account["primary"] as? [String: Any]
             let short = account["short_remaining"] as? String ?? (primary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
             let remaining = short == "?" ? "allowance unknown" : short + " left"
@@ -206,6 +211,13 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let submenu = NSMenu()
             submenu.autoenablesItems = false
             if let email = account["email"] as? String { text(email, into: submenu) }
+            if !assigned.isEmpty {
+                for session in assigned {
+                    let sessionName = session["name"] as? String ?? String((session["id"] as? String ?? "").prefix(10))
+                    text("In use by: \(sessionName)", into: submenu)
+                }
+                text("To switch: open that session → Switch account.", into: submenu)
+            }
             text("Short window: \(remaining)", into: submenu)
             if weekly != "?" { text("Weekly window: \(weekly) left", into: submenu) }
             for row in MenuController.accountTimingRows(account) {
@@ -220,7 +232,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 action(enabled ? "Disable for future routing" : "Enable for routing", args: ["account", enabled ? "disable" : "enable", id], into: submenu)
                 text("Current tasks keep running.", into: submenu)
             }
-            let entry = NSMenuItem(title: "\(name) · \(label)", action: nil, keyEquivalent: "")
+            let entry = NSMenuItem(title: "\(name)\(inUse) · \(label)", action: nil, keyEquivalent: "")
+            entry.state = assigned.isEmpty ? .off : .on
             entry.identifier = NSUserInterfaceItemIdentifier("account:" + (account["id"] as? String ?? name))
             entry.submenu = submenu; menu.addItem(entry)
         }
@@ -248,7 +261,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let modelAllowed = models.isEmpty || model == nil || models.contains(model!)
                     let available = (account["enabled"] as? Bool ?? true) && !(account["maintenance"] as? Bool ?? false) && modelAllowed
                     let name = account["name"] as? String ?? accountID
-                    let choice = action(name + (available ? "" : " · unavailable"), args: ["switch", id, "--account", accountID, "--wait"], into: choices)
+                    let choice = action(name + (selected ? " · Current" : available ? "" : " · unavailable"), args: ["switch", id, "--account", accountID, "--wait"], into: choices)
                     choice.state = selected ? .on : .off
                     choice.isEnabled = !selected && available && !actionRunning
                 }
@@ -363,6 +376,20 @@ if CommandLine.arguments.contains("--self-check") {
     let switchArgs = ["switch", "live", "--account", "two", "--wait"]
     let correctChoices = findAction(switchArgs, in: controls)?.isEnabled == true && findAction(["switch", "live", "--account", "one", "--wait"], in: controls)?.state == .on && findAction(["switch", "live", "--account", "off", "--wait"], in: controls)?.isEnabled == false
     let stoppedControls = findAction(["restart", "stopped", "--if-stopped"], in: controls) != nil && findAction(["pause", "stopped", "--wait"], in: controls) == nil
+    let activeMarker = controls.items.first { $0.identifier?.rawValue == "account:one" }
+    let currentChoice = findAction(["switch", "live", "--account", "one", "--wait"], in: controls)
+    let correctMarker = activeMarker?.state == .on && activeMarker?.title.contains("In use") == true && currentChoice?.title.contains("Current") == true
+    let originalSessions = controller.current["sessions"]
+    controller.current["sessions"] = [["id": "a", "account": "one", "running": true], ["id": "b", "account": "one", "running": true], ["id": "c", "account": "two", "running": true], ["id": "d", "account": "off", "running": false]]
+    let multiple = controller.makeMenu()
+    let one = multiple.items.first { $0.identifier?.rawValue == "account:one" }
+    let two = multiple.items.first { $0.identifier?.rawValue == "account:two" }
+    let off = multiple.items.first { $0.identifier?.rawValue == "account:off" }
+    let correctMultiple = one?.title.contains("In use by 2 sessions") == true && two?.state == .on && off?.state == .off
+    controller.current["sessions"] = [["id": "stopped", "account": "one", "running": false]]
+    let empty = controller.makeMenu()
+    let correctEmpty = empty.items.contains { $0.title.contains("No Relay sessions running") } && empty.items.first { $0.identifier?.rawValue == "account:one" }?.state == .off
+    controller.current["sessions"] = originalSessions
     controller.actionRunning = true; controller.actionNotice = "Applying change…"
     let pending = controller.makeMenu()
     let correctPending = findAction(switchArgs, in: pending)?.isEnabled == false && findAction(["refresh"], in: pending)?.isEnabled == false && findAction(["copy", "relay attach live"], in: pending)?.isEnabled == true
@@ -371,7 +398,8 @@ if CommandLine.arguments.contains("--self-check") {
     let retainedResult = controller.makeMenu().items.contains { $0.title == "Task is busy." }
     print("Account choices and stopped controls correct: \(correctChoices && stoppedControls)")
     print("Pending action protected and result retained: \(correctPending && retainedResult)")
-    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult ? 0 : 1)
+    print("In-use accounts and current choice marked: \(correctMarker && correctMultiple && correctEmpty)")
+    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult && correctMarker && correctMultiple && correctEmpty ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = MenuController(); app.delegate = delegate; app.run()

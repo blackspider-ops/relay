@@ -1,5 +1,11 @@
 # Changes
 
+## 0.6.1
+
+- Mark accounts in use in the main menu and show how many live sessions share them.
+- Label the current account explicitly in each session's switch menu.
+- Explain when no Relay sessions are running instead of implying a global active account.
+
 ## 0.6.0
 
 - Keep dependency setup logs off stdout so first-run completion and JSON remain usable.

@@ -109,6 +109,10 @@ allowance and does not fetch account allowance. `refresh` explicitly checks it.
 The menu uses one local status stream, a template icon, and native session actions.
 Opening it reads a fresh local snapshot, and visible rows update in place.
 Short-window and weekly allowance are labeled separately.
+Accounts assigned to live Relay sessions have a checkmark and an “In use” label;
+shared accounts also show their session count. To switch, open the Relay icon,
+then your session, then **Switch account**, and choose the account email. The
+current choice is marked **Current**. The menu tracks tasks started through Relay.
 Each session menu can switch to another enabled account after work and approvals
 finish. The worker checks allowance and session capacity before switching, then
 checks again that the session is idle before changing its login. Rejected actions
