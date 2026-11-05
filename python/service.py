@@ -51,6 +51,10 @@ def start(
         "interactive": interactive,
         "binary": binary,
         "relay_runtime": str(Path(__file__).parent.resolve()),
+        "foreground_owner": {"pid": os.getpid(), "birth": process_birth(os.getpid())}
+        if interactive
+        else None,
+        "background_launch": not interactive,
     }
     if not Path(spec["cwd"]).is_dir():
         raise ValueError("Working directory does not exist")
@@ -155,6 +159,21 @@ async def attach(
     spec_path = root / (ident + ".job.json")
     spec = json.loads(spec_path.read_text())
     binary = spec.get("binary") or binary
+    owner = spec.get("foreground_owner")
+    if (
+        spec.get("interactive")
+        and not spec.get("background_launch")
+        and owner
+        and not (
+            Pool.alive(owner["pid"])
+            and process_birth(owner["pid"]) == owner.get("birth")
+        )
+    ):
+        spec["foreground_owner"] = {
+            "pid": os.getpid(),
+            "birth": process_birth(os.getpid()),
+        }
+        atomic_json(spec_path, spec)
     meta = root / (ident + ".connection.json")
     invocation_cwd = cwd
     reconnect = False
@@ -353,7 +372,7 @@ def restart(state, prefix):
     spec = json.loads(path.read_text())
     if not Path(spec["cwd"]).is_dir():
         raise RouterError("The project folder no longer exists")
-    spec.update(state="starting")
+    spec.update(state="starting", background_launch=True, foreground_owner=None)
     spec.pop("last_error", None)
     atomic_json(path, spec)
     process = spawn(
@@ -376,6 +395,54 @@ def restart(state, prefix):
     )
     atomic_json(supervisor, {"pid": process.pid, "birth": process_birth(process.pid)})
     return ident
+
+
+def foreground_owner_gone(spec, preferences, controller, *, now=None):
+    """Foreground jobs must not outlive a vanished launcher unless explicitly detached."""
+    if (
+        not spec.get("interactive")
+        or spec.get("background_launch")
+        or spec.get("takeover")
+        or preferences.get("background_on_disconnect")
+        or controller.client
+    ):
+        return False
+    owner = spec.get("foreground_owner")
+    if owner:
+        return not (
+            Pool.alive(owner["pid"])
+            and process_birth(owner["pid"]) == owner.get("birth")
+        )
+    # Earlier jobs did not record a launcher. Only retire a definitely empty,
+    # unattached picker; retain older conversations whose ownership is uncertain.
+    return (
+        not spec.get("resume")
+        and not controller.last_turn
+        and (time.time() if now is None else now) - spec.get("created", time.time())
+        > 60
+    )
+
+
+async def close_orphaned_foreground(controller, spec_path):
+    spec = json.loads(spec_path.read_text())
+    if not foreground_owner_gone(spec, controller.preferences, controller):
+        return
+    if (
+        controller.active_threads
+        or controller.active_items
+        or controller.server_requests
+    ):
+        for thread in controller.last_turn:
+            controller.hold_for_review(thread, "terminal_closed_during_action")
+        controller.exit_state = "needs_attention"
+        if not getattr(controller, "orphan_reported", False):
+            controller.note("needs_attention", reason="terminal_closed_during_action")
+            controller.orphan_reported = True
+        return
+    controller.note("foreground_closed", reason="launcher_exited")
+    spec["state"] = controller.exit_state
+    atomic_json(spec_path, spec)
+    controller.stopping.set()
 
 
 async def _serve(state, ident, binary):
@@ -456,6 +523,9 @@ async def _serve(state, ident, binary):
         return new or old
 
     controller.extra_accounts = reload_accounts
+    controller.lifecycle_check = lambda: close_orphaned_foreground(
+        controller, spec_path
+    )
     controller.preferences = settings.load(state, cwd, spec.get("profile"))
     controller.retry_interval = controller.preferences["retry_interval"]
     controller.retry_attempts = controller.preferences["retry_attempts"]
@@ -513,6 +583,9 @@ async def _serve(state, ident, binary):
                 pool.touch(state="waiting_for_reset", next_wake=deadline)
                 await controller.wait_until(deadline, controller.user_generation)
         if controller.stopping.is_set():
+            latest = json.loads(spec_path.read_text())
+            latest["state"] = controller.exit_state
+            atomic_json(spec_path, latest)
             return 0
         controller.backend_factory = factory
         thread_id = old_thread or spec.get("resume")
@@ -688,7 +761,7 @@ async def _serve(state, ident, binary):
             # have been reconciled. A frontend must not race recovery setup.
             atomic_json(connection, meta)
             await controller.stopping.wait()
-        spec["state"] = "stopped"
+        spec["state"] = controller.exit_state
         atomic_json(spec_path, spec)
         return 0
     finally:

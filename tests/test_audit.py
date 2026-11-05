@@ -343,3 +343,89 @@ class AttachmentRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             parse_arguments(["attach", "task", "--", "--takeover"]).takeover
         )
+
+
+class ForegroundLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_closed_launcher_retires_an_empty_idle_foreground_job(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "job.json"
+            job = {
+                "interactive": True,
+                "foreground_owner": {"pid": 99999999, "birth": "gone"},
+                "state": "starting",
+            }
+            atomic_json(path, job)
+            c = Controller([FakeAccount("one")], FakeBackend(), report=lambda _: None)
+            await service.close_orphaned_foreground(c, path)
+            self.assertTrue(c.stopping.is_set())
+            self.assertEqual(json.loads(path.read_text())["state"], "stopped")
+
+    async def test_real_launcher_background_preference_and_takeover_are_preserved(self):
+        c = Controller([FakeAccount("one")], FakeBackend(), report=lambda _: None)
+        job = {
+            "interactive": True,
+            "foreground_owner": {
+                "pid": os.getpid(),
+                "birth": process_birth(os.getpid()),
+            },
+        }
+        self.assertFalse(service.foreground_owner_gone(job, c.preferences, c))
+        dead = {**job, "foreground_owner": {"pid": 99999999, "birth": "gone"}}
+        for field in ("background_launch", "takeover"):
+            self.assertFalse(
+                service.foreground_owner_gone({**dead, field: True}, c.preferences, c)
+            )
+        self.assertFalse(
+            service.foreground_owner_gone(
+                dead, {**c.preferences, "background_on_disconnect": True}, c
+            )
+        )
+        c.client = FakeClient()
+        self.assertFalse(service.foreground_owner_gone(dead, c.preferences, c))
+
+    async def test_orphaned_active_action_requires_review_and_is_not_killed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            path = state / "job.json"
+            pool = Pool(state)
+            atomic_json(
+                path,
+                {
+                    "interactive": True,
+                    "foreground_owner": {"pid": 99999999, "birth": "gone"},
+                },
+            )
+            c = Controller(
+                [FakeAccount("one")], FakeBackend(), pool=pool, report=lambda _: None
+            )
+            c.last_turn["thread"] = {"threadId": "thread"}
+            c.active_items.add("command")
+            await service.close_orphaned_foreground(c, path)
+            self.assertFalse(c.stopping.is_set())
+            self.assertTrue(pool.intent("thread")["review_required"])
+            c.active_items.clear()
+            await service.close_orphaned_foreground(c, path)
+            self.assertTrue(c.stopping.is_set())
+            self.assertEqual(json.loads(path.read_text())["state"], "needs_attention")
+            pool.close()
+
+    async def test_explicit_review_or_stop_clears_orphan_exit_status(self):
+        c = Controller([FakeAccount("one")], FakeBackend(), report=lambda _: None)
+        c.hold_for_review("thread")
+        c.exit_state = "needs_attention"
+        c.clear_review("thread")
+        self.assertEqual(c.exit_state, "stopped")
+        c.exit_state = "needs_attention"
+        await c.control("stop", {})
+        self.assertEqual(c.exit_state, "stopped")
+
+    def test_legacy_empty_picker_expires_but_saved_conversation_is_retained(self):
+        c = Controller([FakeAccount("one")], FakeBackend(), report=lambda _: None)
+        job = {"interactive": True, "created": 1000}
+        self.assertFalse(service.foreground_owner_gone(job, c.preferences, c, now=1005))
+        self.assertTrue(service.foreground_owner_gone(job, c.preferences, c, now=1100))
+        self.assertFalse(
+            service.foreground_owner_gone(
+                {**job, "resume": "saved"}, c.preferences, c, now=1100
+            )
+        )

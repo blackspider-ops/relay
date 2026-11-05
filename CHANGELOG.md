@@ -1,5 +1,12 @@
 # Changes
 
+## 0.5.2
+
+- Update open menu rows in place and refresh the local snapshot when opening the menu.
+- Label short and weekly allowance separately in account menu rows.
+- Retire foreground workers when their launcher exits, retaining explicit background jobs and takeovers.
+- Preserve a review hold when a terminal disappears during an active action.
+
 ## 0.5.1
 
 - Apply an explicit reviewed retry even when a previous retry timer is still pending.

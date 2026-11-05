@@ -8,6 +8,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var message: String?
     var reconnect: DispatchWorkItem?
     var stopping = false
+    var snapshotInFlight = false
     let command = Bundle.main.object(forInfoDictionaryKey: "RelayCommand") as? String ?? "/usr/bin/false"
     let state = Bundle.main.object(forInfoDictionaryKey: "RelayState") as? String ?? ""
 
@@ -61,8 +62,54 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         while let newline = buffer.firstIndex(of: 10) {
             let line = buffer.prefix(upTo: newline); buffer.removeSubrange(...newline)
             if let value = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] {
-                current = value; message = nil; render()
+                if (value["at"] as? Double ?? 0) >= (current["at"] as? Double ?? 0) { current = value; message = nil; render() }
             }
+        }
+    }
+    func refreshSnapshot() {
+        guard !snapshotInFlight, !stopping else { return }
+        snapshotInFlight = true
+        let proc = process(["status", "--json"])
+        let pipe = Pipe(); proc.standardOutput = pipe; proc.standardError = FileHandle.nullDevice
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var snapshot: [String: Any]?
+            do {
+                try proc.run()
+                let timeout = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8, execute: timeout)
+                let bytes = pipe.fileHandleForReading.readDataToEndOfFile(); proc.waitUntilExit(); timeout.cancel()
+                if proc.terminationStatus == 0 { snapshot = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any] }
+            } catch { }
+            let result = snapshot
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.snapshotInFlight = false
+                if let value = result {
+                    let at = value["at"] as? Double ?? 0
+                    if at >= (self.current["at"] as? Double ?? 0) { self.current = value; self.render() }
+                }
+            }
+        }
+    }
+    static func synchronise(_ live: NSMenu, with desired: NSMenu) {
+        let incoming = desired.items
+        while live.items.count > incoming.count { live.removeItem(at: live.items.count - 1) }
+        for (index, fresh) in incoming.enumerated() {
+            if index >= live.items.count {
+                desired.removeItem(fresh); live.addItem(fresh); continue
+            }
+            let existing = live.items[index]
+            if existing.isSeparatorItem != fresh.isSeparatorItem {
+                live.removeItem(at: index); desired.removeItem(fresh); live.insertItem(fresh, at: index); continue
+            }
+            existing.title = fresh.title; existing.state = fresh.state
+            existing.target = fresh.target; existing.action = fresh.action
+            existing.keyEquivalent = fresh.keyEquivalent; existing.isEnabled = fresh.isEnabled
+            existing.representedObject = fresh.representedObject; existing.toolTip = fresh.toolTip
+            if let child = fresh.submenu {
+                if let previous = existing.submenu { synchronise(previous, with: child) }
+                else { fresh.submenu = nil; existing.submenu = child }
+            } else { existing.submenu = nil }
         }
     }
     func updateIcon(attention: Bool) {
@@ -72,7 +119,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.button?.image = image
     }
     func text(_ title: String, into menu: NSMenu) {
-        menu.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: ""))
+        let entry = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        entry.isEnabled = false; menu.addItem(entry)
     }
     func action(_ title: String, args: [String], into menu: NSMenu) {
         let entry = NSMenuItem(title: title, action: #selector(runAction(_:)), keyEquivalent: "")
@@ -111,7 +159,10 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let name = account["name"] as? String ?? "Account"
             let primary = account["primary"] as? [String: Any]
             let remaining = (primary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))% left" } ?? "allowance unknown"
-            let label = (account["enabled"] as? Bool ?? true) ? remaining : "disabled"
+            let secondary = account["secondary"] as? [String: Any]
+            let weekly = (secondary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
+            let short = (primary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
+            let label = (account["enabled"] as? Bool ?? true) ? "Short \(short) · Week \(weekly)" : "disabled"
             let submenu = NSMenu()
             if let email = account["email"] as? String { text(email, into: submenu) }
             text("Short window: \(remaining)", into: submenu)
@@ -120,7 +171,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             text("Last checked: \(date(account["usage_checked_at"]))", into: submenu)
             let entry = NSMenuItem(title: "\(name) · \(label)", action: nil, keyEquivalent: ""); entry.submenu = submenu; menu.addItem(entry)
         }
-        menu.addItem(.separator())
+        if !sessions.isEmpty { menu.addItem(.separator()) }
         for session in sessions {
             let id = session["id"] as? String ?? ""
             let name = session["name"] as? String ?? String(id.prefix(10))
@@ -143,9 +194,11 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.relay.menu.plist") ? .on : .off
         menu.addItem(login)
         let quit = NSMenuItem(title: "Quit Relay menu", action: #selector(quitMenu), keyEquivalent: "q"); quit.target = self; menu.addItem(quit)
-        item.menu = menu
+        if let visible = item.menu { MenuController.synchronise(visible, with: menu) }
+        else { item.menu = menu }
     }
     func menuWillOpen(_ menu: NSMenu) {
+        refreshSnapshot()
         updateTimes(menu)
         for entry in menu.items where entry.title == "Open at login" {
             entry.state = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.relay.menu.plist") ? .on : .off
@@ -181,7 +234,13 @@ if CommandLine.arguments.contains("--self-check") {
     let normal = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Relay")
     let attention = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Relay needs attention")
     print("Relay menu symbols available: \(normal != nil && attention != nil)")
-    exit(normal != nil && attention != nil ? 0 : 1)
+    let visible = NSMenu(); visible.addItem(NSMenuItem(title: "Short 83%", action: nil, keyEquivalent: ""))
+    let existing = visible.items[0]
+    let updated = NSMenu(); updated.addItem(NSMenuItem(title: "Short 30%", action: nil, keyEquivalent: ""))
+    MenuController.synchronise(visible, with: updated)
+    let liveUpdate = visible.items[0] === existing && existing.title == "Short 30%"
+    print("Visible menu update preserved: \(liveUpdate)")
+    exit(normal != nil && attention != nil && liveUpdate ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = MenuController(); app.delegate = delegate; app.run()

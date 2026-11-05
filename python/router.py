@@ -24,7 +24,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -427,6 +427,8 @@ class Controller:
         self.stopping = asyncio.Event()
         self.extra_accounts = None
         self.starting = False
+        self.lifecycle_check = None
+        self.exit_state = "stopped"
         self.on_thread = None
         self.on_detach = None
         self.project = os.getcwd()
@@ -525,6 +527,8 @@ class Controller:
 
     def clear_review(self, thread):
         self.paused_uncertain.discard(thread)
+        if not self.paused_uncertain:
+            self.exit_state = "stopped"
         self.persist(thread, review_required=False, review_reason=None)
 
     def can_continue(self, thread, generation):
@@ -681,6 +685,10 @@ class Controller:
                     except Exception:
                         self.pool.ack(command, "failed")
                         self.note("control_failed", operation=op)
+            if self.lifecycle_check:
+                await self.lifecycle_check()
+                if self.stopping.is_set():
+                    break
             if self.preferences.get("keep_awake") and self.active_threads:
                 if (
                     self.awake_process is None
@@ -738,6 +746,7 @@ class Controller:
             self.wake.set()
             self.note("resumed")
         elif op == "stop":
+            self.exit_state = "stopped"
             self.stopping.set()
         elif op == "detach":
             if self.pool:

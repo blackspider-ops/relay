@@ -97,6 +97,8 @@ The watch view waits for local file changes and redraws only when useful status
 changes. Heartbeats do not repeatedly print the table. Watching uses no model
 allowance and does not fetch account allowance. `refresh` explicitly checks it.
 The menu uses one local status stream, a template icon, and native session actions.
+Opening it reads a fresh local snapshot, and visible rows update in place.
+Short-window and weekly allowance are labeled separately.
 It opens at Mac login after `relay menubar`; disable that in its menu or with
 `relay menubar --no-startup --configure-only`.
 
@@ -121,6 +123,10 @@ relay startup disable SESSION_ID
 A workspace saves the same supervised session IDs, rather than starting fresh
 conversations. Restore restarts stopped jobs and prints reconnect commands; live
 jobs are retained. Save specific sessions by appending their IDs to `workspace save`.
+
+Foreground jobs close after their launcher disappears and current activity is
+idle. Explicit background tasks and takeovers remain running. An interrupted action
+is retained for review rather than being silently retried.
 
 The normal command remains available after reboot. Background task recovery at
 login is a separate opt-in setting; enabling the menu does not enable task startup.
