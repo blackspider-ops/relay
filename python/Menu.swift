@@ -6,7 +6,11 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var buffer = Data()
     var current: [String: Any] = [:]
     var message: String?
-    var actionNotice: String?
+    var actionNotice: String? {
+        didSet { noticeVersion += 1; noticeExpiry?.cancel(); noticeExpiry = nil }
+    }
+    var noticeVersion = 0
+    var noticeExpiry: DispatchWorkItem?
     var actionFailed = false
     var actionRunning = false
     var reconnect: DispatchWorkItem?
@@ -194,6 +198,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let visible = item.menu { MenuController.synchronise(visible, with: menu) }
         else { item.menu = menu }
         if menuOpen { scheduleResetExpiry() }
+        scheduleNoticeExpiry()
     }
     func makeMenu() -> NSMenu {
         let sessions = current["sessions"] as? [[String: Any]] ?? []
@@ -205,7 +210,6 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let message = message { text(message, into: menu) }
         if let notice = actionNotice {
             text(notice, into: menu)
-            if !actionRunning { action("Dismiss message", args: ["dismiss"], into: menu) }
         }
         if accounts.isEmpty { text("Add an account with relay setup in Terminal.", into: menu) }
         if liveSessions.isEmpty && !accounts.isEmpty { text("No Relay sessions running. Start with relay run.", into: menu) }
@@ -335,6 +339,21 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
     func menuDidClose(_ menu: NSMenu) { menuOpen = false; resetExpiry?.cancel(); resetExpiry = nil }
+    func scheduleNoticeExpiry() {
+        guard menuOpen, !actionRunning, actionNotice != nil, noticeExpiry == nil else { return }
+        let version = noticeVersion
+        let expiry = DispatchWorkItem { [weak self] in
+            guard let self = self, self.expireNotice(version: version) else { return }
+            self.render()
+        }
+        noticeExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: expiry)
+    }
+    func expireNotice(version: Int) -> Bool {
+        guard !stopping, !actionRunning, actionNotice != nil, noticeVersion == version else { return false }
+        actionNotice = nil; actionFailed = false
+        return true
+    }
     func resetAllowed(_ id: String) -> Bool {
         let accounts = current["accounts"] as? [[String: Any]] ?? []
         guard let account = accounts.first(where: { $0["id"] as? String == id }) else {
@@ -346,7 +365,6 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func runAction(_ sender: NSMenuItem) {
         guard var args = sender.representedObject as? [String], !args.isEmpty else { return }
         if args[0] == "copy" { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(args[1], forType: .string); return }
-        if args[0] == "dismiss" { actionNotice = nil; actionFailed = false; render(); return }
         guard !actionRunning else { return }
         if args[0] == "confirm-retry" {
             let alert = NSAlert(); alert.messageText = "Continue this task?"; alert.informativeText = "Review any interrupted command or external action in the conversation before continuing."
@@ -404,7 +422,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         runAction(sender)
     }
     @objc func quitMenu() { stopping = true; reconnect?.cancel(); stream?.terminate(); NSApp.terminate(nil) }
-    func applicationWillTerminate(_ notification: Notification) { stopping = true; stream?.terminate() }
+    func applicationWillTerminate(_ notification: Notification) { stopping = true; noticeExpiry?.cancel(); resetExpiry?.cancel(); stream?.terminate() }
 }
 if CommandLine.arguments.contains("--self-check") {
     let normal = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Relay")
@@ -473,12 +491,26 @@ if CommandLine.arguments.contains("--self-check") {
     controller.actionRunning = false; controller.actionNotice = "Task is busy."
     controller.current["at"] = 2000000001.0
     let retainedResult = controller.makeMenu().items.contains { $0.title == "Task is busy." }
+    let noDismissButton = findAction(["dismiss"], in: controller.makeMenu()) == nil
+    controller.menuOpen = false; controller.actionFailed = true; controller.actionNotice = "Unseen result"
+    controller.scheduleNoticeExpiry()
+    let unseenRetained = controller.noticeExpiry == nil && controller.actionNotice == "Unseen result"
+    controller.menuOpen = true; controller.scheduleNoticeExpiry()
+    let startsOnView = controller.noticeExpiry != nil
+    let previousNotice = controller.noticeVersion
+    controller.actionNotice = "Newer result"
+    let newerProtected = !controller.expireNotice(version: previousNotice) && controller.actionNotice == "Newer result"
+    controller.actionRunning = true; controller.scheduleNoticeExpiry()
+    let progressRetained = controller.noticeExpiry == nil && !controller.expireNotice(version: controller.noticeVersion)
+    controller.actionRunning = false
+    let expiresAfterView = controller.expireNotice(version: controller.noticeVersion) && controller.actionNotice == nil && !controller.actionFailed
     print("Account choices and stopped controls correct: \(correctChoices && stoppedControls)")
     print("Pending action protected and result retained: \(correctPending && retainedResult)")
     print("In-use accounts and current choice marked: \(correctMarker && correctMultiple && correctEmpty)")
     print("Available and pending reset actions protected: \(correctResets && resetLocked)")
     print("Weekly zero and more-than-48-hour guard enforced: \(correctPolicy && pendingLocked)")
-    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult && correctMarker && correctMultiple && correctEmpty && correctResets && resetLocked && correctPolicy && pendingLocked ? 0 : 1)
+    print("Viewed notices expire without hiding unseen or newer results: \(noDismissButton && unseenRetained && startsOnView && newerProtected && progressRetained && expiresAfterView)")
+    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult && correctMarker && correctMultiple && correctEmpty && correctResets && resetLocked && correctPolicy && pendingLocked && noDismissButton && unseenRetained && startsOnView && newerProtected && progressRetained && expiresAfterView ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = MenuController(); app.delegate = delegate; app.run()

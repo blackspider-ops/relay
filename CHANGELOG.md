@@ -1,5 +1,11 @@
 # Changes
 
+## 0.7.2
+
+- Remove the Dismiss message button.
+- Clear action results 30 seconds after first being viewed in the menu.
+- Retain unseen results and in-progress action messages, and prevent an old timer from clearing a newer result.
+
 ## 0.7.1
 
 - Enable reset only with weekly allowance fully exhausted (0%) and its reset more than 48 hours away.

@@ -140,7 +140,9 @@ Each session menu can switch to another enabled account after work and approvals
 finish. The worker checks allowance and session capacity before switching, then
 checks again that the session is idle before changing its login. Rejected actions
 show their reason. Pending menu actions cannot be submitted twice, and results
-remain visible until dismissed or another action starts. Stopped workers offer
+disappear 30 seconds after first being viewed in the menu. Unseen results wait
+until the menu is opened; action progress remains until the action finishes.
+Starting another action replaces its previous result. Stopped workers offer
 Restart; restarting retains any review hold.
 
 Account menus can disable or enable future routing. Disabling an account does not
