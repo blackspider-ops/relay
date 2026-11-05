@@ -85,6 +85,31 @@ class ManagementTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare_worktree(["resume", "--worktree"], state, str(repo))
 
+    def test_both_displays_receive_the_same_fractional_allowance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            home = state / "accounts" / "one"
+            home.mkdir(parents=True)
+            (home / "enrolled").write_text("{}")
+            pool = Pool(state)
+            pool.save(
+                "one",
+                {
+                    "rateLimits": {
+                        "primary": {"usedPercent": 70.2},
+                        "secondary": {"usedPercent": 41.5},
+                    }
+                },
+            )
+            value = commands.snapshot(state)
+            account = value["accounts"][0]
+            self.assertEqual(account["short_remaining"], "29.8%")
+            self.assertEqual(account["weekly_remaining"], "58.5%")
+            text = commands.render(value)
+            self.assertIn(account["short_remaining"], text)
+            self.assertIn(account["weekly_remaining"], text)
+            pool.close()
+
     def test_account_emails_are_displayed_and_resolve_without_reading_tokens(self):
         with tempfile.TemporaryDirectory() as folder:
             state = Path(folder)

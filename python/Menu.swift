@@ -158,15 +158,15 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for account in accounts {
             let name = account["name"] as? String ?? "Account"
             let primary = account["primary"] as? [String: Any]
-            let remaining = (primary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))% left" } ?? "allowance unknown"
+            let short = account["short_remaining"] as? String ?? (primary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
+            let remaining = short == "?" ? "allowance unknown" : short + " left"
             let secondary = account["secondary"] as? [String: Any]
-            let weekly = (secondary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
-            let short = (primary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
+            let weekly = account["weekly_remaining"] as? String ?? (secondary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
             let label = (account["enabled"] as? Bool ?? true) ? "Short \(short) · Week \(weekly)" : "disabled"
             let submenu = NSMenu()
             if let email = account["email"] as? String { text(email, into: submenu) }
             text("Short window: \(remaining)", into: submenu)
-            if let secondary = account["secondary"] as? [String: Any], let used = secondary["usedPercent"] as? NSNumber { text("Weekly window: \(max(0, 100 - used.intValue))% left", into: submenu) }
+            if weekly != "?" { text("Weekly window: \(weekly) left", into: submenu) }
             if let reset = account["next_check"] { countdown("Next check", value: reset, into: submenu) }
             text("Last checked: \(date(account["usage_checked_at"]))", into: submenu)
             let entry = NSMenuItem(title: "\(name) · \(label)", action: nil, keyEquivalent: ""); entry.submenu = submenu; menu.addItem(entry)

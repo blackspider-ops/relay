@@ -68,6 +68,13 @@ def resolve_label(state, value):
     raise RouterError("Unknown or ambiguous account name")
 
 
+def remaining_percent(window):
+    if not window or not isinstance(window.get("usedPercent"), (int, float)):
+        return "?"
+    value = max(0, min(100, 100 - window["usedPercent"]))
+    return f"{value:.1f}".rstrip("0").rstrip(".") + "%"
+
+
 def snapshot(state, include_inactive=False):
     from router import labels, VERSION
 
@@ -99,6 +106,8 @@ def snapshot(state, include_inactive=False):
                     "sessions": sum(s["account"] == label for s in sessions),
                     "primary": windows.get("primary"),
                     "secondary": windows.get("secondary"),
+                    "short_remaining": remaining_percent(windows.get("primary")),
+                    "weekly_remaining": remaining_percent(windows.get("secondary")),
                     "usage_known": usage is not None,
                     "usage_checked_at": pool.checked_at(label),
                     "maintenance": options.get("maintenance", False),
@@ -172,10 +181,6 @@ def snapshot(state, include_inactive=False):
 
 
 def render(value):
-    def percent(window):
-        return (
-            "?" if not window else str(max(0, 100 - window.get("usedPercent", 0))) + "%"
-        )
 
     lines = [
         f"Relay · {len(value['sessions'])} sessions · {len(value['accounts'])} accounts",
@@ -200,7 +205,7 @@ def render(value):
             else "—"
         )
         lines.append(
-            f"{label:<39}{state:<13}{percent(account['primary']):<13}{percent(account['secondary']):<13}{account['sessions']:<10}{next_at}"
+            f"{label:<39}{state:<13}{account.get('short_remaining', remaining_percent(account['primary'])):<13}{account.get('weekly_remaining', remaining_percent(account['secondary'])):<13}{account['sessions']:<10}{next_at}"
         )
     if value["sessions"]:
         lines += [
