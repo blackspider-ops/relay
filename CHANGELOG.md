@@ -1,5 +1,12 @@
 # Changes
 
+## 0.7.3
+
+- Reconcile stale tool activity against matching full Codex history before waiting to switch accounts.
+- Continue quota recovery when a finished tool’s completion notification was missed.
+- Retain waits for running or unverified tools, approvals, child threads and pause state.
+- Ignore already-terminal tool starts and invalidate reconciliation if new activity arrives during a read.
+
 ## 0.7.2
 
 - Remove the Dismiss message button.

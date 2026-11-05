@@ -55,6 +55,9 @@ def finish(thread, turn, text, mode):
         value = data["threads"][thread]
         value["status"] = {"type": "idle"}
         value["turns"][-1].update(status=status, error=error)
+        for item in value["turns"][-1]["items"]:
+            if item.get("id", "").startswith("lost-completion-"):
+                item["status"] = "completed"
         return value["turns"][-1].copy()
 
     value = change(apply)
@@ -208,6 +211,8 @@ for raw in sys.stdin:
                     ]
                 )
             }
+            for value in result["data"]:
+                value["itemsView"] = params.get("itemsView", "summary")
         elif method == "thread/loaded/list":
             result = {"data": change(lambda d: list(d["threads"]))}
         elif method in {"turn/start", "review/start"}:
@@ -243,6 +248,21 @@ for raw in sys.stdin:
                     "params": {"threadId": thread, "turn": value},
                 }
             )
+            if count <= fault.get("lost_completion_turns", 0):
+                tool = {
+                    "id": "lost-completion-" + turn,
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                }
+                change(
+                    lambda d: d["threads"][thread]["turns"][-1]["items"].append(tool)
+                )
+                send(
+                    {
+                        "method": "item/started",
+                        "params": {"threadId": thread, "item": tool},
+                    }
+                )
             if fault.get("external"):
                 send(
                     {

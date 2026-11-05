@@ -49,6 +49,15 @@ Relay rechecks this after checking the target account, so work starting during
 that check also prevents switching. A rejected menu action keeps its explanation
 visible. Use Restart for a stopped worker rather than sending it live controls.
 
+**A usage-limit panel remains open and Relay says “waiting for activity.”**
+
+Update Relay if you are using a version older than 0.7.3. A missed tool-completion
+notification could leave a finished tool marked as active. Relay now checks full
+native history for the matching tool before continuing account recovery. It keeps
+waiting when work is still running or completion cannot be verified; approvals
+and paused recovery still need attention. Existing workers retain the code they
+started with, so an update takes effect after that worker is relaunched.
+
 **Tab completion is missing.**
 
 Load `source <(relay completion zsh)` after `compinit`, or use

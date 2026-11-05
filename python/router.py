@@ -24,7 +24,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -434,6 +434,8 @@ class Controller:
         self.recovery_jobs = {}
         self.pending_intents = {}
         self.active_items = set()
+        self.active_item_threads = {}
+        self.item_revision = 0
         self.backend_factory = None
         self.restart_lock = asyncio.Lock()
         self.restart_task = None
@@ -877,6 +879,8 @@ class Controller:
             self.pending_server_requests.clear()
             self.replayed_requests.clear()
             self.active_items.clear()
+            self.active_item_threads.clear()
+            self.item_revision += 1
             for thread in list(self.last_turn):
                 params = {"threadId": thread}
                 params.update(
@@ -1034,11 +1038,18 @@ class Controller:
             "fileChange",
             "dynamicToolCall",
         }:
-            self.active_items.add(params["item"]["id"])
-            if params.get("threadId"):
-                self.persist(params["threadId"], active_items=True)
+            item = params["item"]
+            if item.get("status") not in {"completed", "failed", "declined"}:
+                self.active_items.add(item["id"])
+                self.item_revision += 1
+                if params.get("threadId"):
+                    self.active_item_threads[item["id"]] = params["threadId"]
+                    self.persist(params["threadId"], active_items=True)
         elif method == "item/completed":
-            self.active_items.discard(params.get("item", {}).get("id"))
+            item = params.get("item", {}).get("id")
+            self.active_items.discard(item)
+            self.active_item_threads.pop(item, None)
+            self.item_revision += 1
             if params.get("threadId"):
                 self.persist(params["threadId"], active_items=bool(self.active_items))
         elif method == "model/rerouted":
@@ -1173,6 +1184,14 @@ class Controller:
         ):
             if generation != self.user_generation or not self.attached():
                 return False
+            await self.reconcile_active_items()
+            if not (
+                self.active_threads
+                or self.active_items
+                or self.server_requests
+                or self.paused
+            ):
+                break
             self.status_changed.clear()
             try:
                 await asyncio.wait_for(
@@ -1193,6 +1212,69 @@ class Controller:
                 except asyncio.TimeoutError:
                     pass
         return generation == self.user_generation and self.attached()
+
+    async def reconcile_active_items(self):
+        """Retire missed completion events only from matching, full native history."""
+        owners = dict(self.active_item_threads)
+        revision = self.item_revision
+        for thread in set(owners.values()):
+            pending = {
+                item
+                for item, owner in owners.items()
+                if owner == thread and item in self.active_items
+            }
+            if not pending:
+                continue
+            cursor = None
+            visited = set()
+            for _ in range(8):
+                params = {
+                    "threadId": thread,
+                    "limit": 1,
+                    "sortDirection": "desc",
+                    "itemsView": "full",
+                }
+                if cursor:
+                    params["cursor"] = cursor
+                try:
+                    result = await self.backend.call(
+                        "thread/turns/list", params, timeout=15
+                    )
+                except (RouterError, asyncio.TimeoutError):
+                    break
+                # A concurrent start invalidates this history read. Never clear
+                # a newly started action using a snapshot taken before it began.
+                if revision != self.item_revision:
+                    return
+                confirmed = {
+                    item.get("id")
+                    for turn in result.get("data", [])
+                    if turn.get("itemsView") == "full"
+                    for item in turn.get("items", [])
+                    if item.get("type")
+                    in {
+                        "commandExecution",
+                        "mcpToolCall",
+                        "fileChange",
+                        "dynamicToolCall",
+                    }
+                    and item.get("status") in {"completed", "failed", "declined"}
+                }
+                cleared = pending & confirmed
+                for item in cleared:
+                    if self.active_item_threads.get(item) == thread:
+                        self.active_items.discard(item)
+                        self.active_item_threads.pop(item, None)
+                if cleared:
+                    pending -= cleared
+                    self.persist(thread, active_items=bool(self.active_items))
+                    if self.pool:
+                        self.pool.record("tool_activity_reconciled", count=len(cleared))
+                    self.status_changed.set()
+                cursor = result.get("nextCursor")
+                if not pending or not cursor or cursor in visited:
+                    break
+                visited.add(cursor)
 
     async def continue_thread(self, thread, generation):
         if not self.can_continue(thread, generation):
