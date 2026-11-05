@@ -377,9 +377,20 @@ class Pool:
                 )
         return [(r[0], r[1], json.loads(r[2])) for r in rows]
 
-    def ack(self, command, status):
+    def ack(self, command, status, *, reason=None):
         with self.db() as db:
             db.execute("UPDATE commands SET status=? WHERE id=?", (status, command))
+            if reason is not None:
+                row = db.execute(
+                    "SELECT details FROM commands WHERE id=?", (command,)
+                ).fetchone()
+                if row:
+                    details = json.loads(row[0])
+                    details["_rejection"] = reason
+                    db.execute(
+                        "UPDATE commands SET details=? WHERE id=?",
+                        (json.dumps(details), command),
+                    )
 
     def claim(self, thread):
         with self.db() as db:

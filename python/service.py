@@ -784,19 +784,22 @@ async def _serve(state, ident, binary):
 
 
 async def wait_control(pool, command, timeout=15):
-    from router import RouterError
+    from router import RouterError, CONTROL_REJECTIONS
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with pool.db() as db:
             row = db.execute(
-                "SELECT status FROM commands WHERE id=?", (command,)
+                "SELECT status,details FROM commands WHERE id=?", (command,)
             ).fetchone()
         if row and row[0] == "done":
             return
         if row and row[0] == "failed":
             raise RouterError(
-                "Session rejected that action. Check status and events; no change was assumed."
+                CONTROL_REJECTIONS.get(
+                    json.loads(row[1]).get("_rejection"),
+                    "Session rejected that action. Check status and events; no change was assumed.",
+                )
             )
         await asyncio.sleep(0.1)
     raise RouterError("Session control timed out; check status before retrying.")

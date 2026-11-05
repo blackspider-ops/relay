@@ -6,6 +6,9 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var buffer = Data()
     var current: [String: Any] = [:]
     var message: String?
+    var actionNotice: String?
+    var actionFailed = false
+    var actionRunning = false
     var reconnect: DispatchWorkItem?
     var stopping = false
     var snapshotInFlight = false
@@ -122,10 +125,12 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let entry = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         entry.isEnabled = false; menu.addItem(entry)
     }
-    func action(_ title: String, args: [String], into menu: NSMenu) {
+    @discardableResult func action(_ title: String, args: [String], into menu: NSMenu) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: #selector(runAction(_:)), keyEquivalent: "")
         entry.target = self; entry.representedObject = args
+        entry.isEnabled = !actionRunning || args.first == "copy"
         entry.identifier = NSUserInterfaceItemIdentifier("action:" + args.joined(separator: "|")); menu.addItem(entry)
+        return entry
     }
     struct TimingRow {
         let title: String
@@ -170,12 +175,25 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func render() {
         let sessions = current["sessions"] as? [[String: Any]] ?? []
         let accounts = current["accounts"] as? [[String: Any]] ?? []
-        let attention = message != nil || sessions.contains { ($0["state"] as? String) == "needs_attention" }
+        let attention = message != nil || actionFailed || sessions.contains { ($0["state"] as? String) == "needs_attention" }
         updateIcon(attention: attention)
         item.button?.toolTip = "Relay · \(sessions.count) sessions · \(accounts.count) accounts"
+        let menu = makeMenu()
+        updateTimes(menu)
+        if let visible = item.menu { MenuController.synchronise(visible, with: menu) }
+        else { item.menu = menu }
+    }
+    func makeMenu() -> NSMenu {
+        let sessions = current["sessions"] as? [[String: Any]] ?? []
+        let accounts = current["accounts"] as? [[String: Any]] ?? []
         let menu = NSMenu(); menu.delegate = self
+        menu.autoenablesItems = false
         text("Relay · \(sessions.count) sessions", into: menu)
         if let message = message { text(message, into: menu) }
+        if let notice = actionNotice {
+            text(notice, into: menu)
+            if !actionRunning { action("Dismiss message", args: ["dismiss"], into: menu) }
+        }
         if accounts.isEmpty { text("Add an account with relay setup in Terminal.", into: menu) }
         for account in accounts {
             let name = account["name"] as? String ?? "Account"
@@ -186,6 +204,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let weekly = account["weekly_remaining"] as? String ?? (secondary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
             let label = (account["enabled"] as? Bool ?? true) ? "Short \(short) · Week \(weekly)" : "disabled"
             let submenu = NSMenu()
+            submenu.autoenablesItems = false
             if let email = account["email"] as? String { text(email, into: submenu) }
             text("Short window: \(remaining)", into: submenu)
             if weekly != "?" { text("Weekly window: \(weekly) left", into: submenu) }
@@ -195,6 +214,12 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             let lastChecked = MenuController.timestamp(account["usage_checked_at"]).map { date($0) } ?? "Not checked yet"
             text("Last checked: \(lastChecked)", into: submenu)
+            if let id = account["id"] as? String {
+                submenu.addItem(.separator())
+                let enabled = account["enabled"] as? Bool ?? true
+                action(enabled ? "Disable for future routing" : "Enable for routing", args: ["account", enabled ? "disable" : "enable", id], into: submenu)
+                text("Current tasks keep running.", into: submenu)
+            }
             let entry = NSMenuItem(title: "\(name) · \(label)", action: nil, keyEquivalent: "")
             entry.identifier = NSUserInterfaceItemIdentifier("account:" + (account["id"] as? String ?? name))
             entry.submenu = submenu; menu.addItem(entry)
@@ -205,14 +230,37 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let name = session["name"] as? String ?? String(id.prefix(10))
             let status = (session["state"] as? String ?? "unknown").replacingOccurrences(of: "_", with: " ")
             let submenu = NSMenu()
+            submenu.autoenablesItems = false
             text("Account: \(session["account_name"] as? String ?? session["account"] as? String ?? "unknown")", into: submenu)
             text("Model: \(session["model"] as? String ?? "unknown")", into: submenu)
             if let next = MenuController.timestamp(session["next_wake"]) { countdown("Next action", value: next, into: submenu) }
             if let reason = session["reason"] as? String { text(reason.replacingOccurrences(of: "_", with: " "), into: submenu) }
             action("Copy reconnect command", args: ["copy", "relay attach " + id], into: submenu)
-            action("Pause recovery", args: ["pause", id, "--wait"], into: submenu)
-            action("Resume recovery", args: ["unpause", id, "--wait"], into: submenu)
-            action("Review and retry…", args: ["confirm-retry", id], into: submenu)
+            if session["running"] as? Bool ?? true {
+                let paused = session["paused"] as? Bool ?? false
+                action(paused ? "Resume recovery" : "Pause recovery", args: [paused ? "unpause" : "pause", id, "--wait"], into: submenu)
+                let choices = NSMenu(); choices.autoenablesItems = false
+                for account in accounts {
+                    guard let accountID = account["id"] as? String else { continue }
+                    let selected = accountID == session["account"] as? String
+                    let models = account["models"] as? [String] ?? []
+                    let model = session["model"] as? String
+                    let modelAllowed = models.isEmpty || model == nil || models.contains(model!)
+                    let available = (account["enabled"] as? Bool ?? true) && !(account["maintenance"] as? Bool ?? false) && modelAllowed
+                    let name = account["name"] as? String ?? accountID
+                    let choice = action(name + (available ? "" : " · unavailable"), args: ["switch", id, "--account", accountID, "--wait"], into: choices)
+                    choice.state = selected ? .on : .off
+                    choice.isEnabled = !selected && available && !actionRunning
+                }
+                text("Switch after current work and approvals finish.", into: choices)
+                let switchItem = NSMenuItem(title: "Switch account", action: nil, keyEquivalent: "")
+                switchItem.identifier = NSUserInterfaceItemIdentifier("switch:" + id)
+                switchItem.submenu = choices; submenu.addItem(switchItem)
+                action("Review and retry…", args: ["confirm-retry", id], into: submenu)
+            } else {
+                text("Worker stopped. Restart to reconnect; review holds are retained.", into: submenu)
+                action("Restart session", args: ["restart", id, "--if-stopped"], into: submenu)
+            }
             let entry = NSMenuItem(title: "\(name) · \(status)", action: nil, keyEquivalent: "")
             entry.identifier = NSUserInterfaceItemIdentifier("session:" + id)
             entry.submenu = submenu; menu.addItem(entry)
@@ -221,12 +269,11 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         action("Copy dashboard command", args: ["copy", "relay status --watch"], into: menu)
         action("Check allowance now", args: ["refresh"], into: menu)
         let login = NSMenuItem(title: "Open at login", action: #selector(toggleLogin), keyEquivalent: ""); login.target = self
+        login.isEnabled = !actionRunning
         login.state = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.relay.menu.plist") ? .on : .off
         menu.addItem(login)
         let quit = NSMenuItem(title: "Quit Relay menu", action: #selector(quitMenu), keyEquivalent: "q"); quit.target = self; menu.addItem(quit)
-        updateTimes(menu)
-        if let visible = item.menu { MenuController.synchronise(visible, with: menu) }
-        else { item.menu = menu }
+        return menu
     }
     func menuWillOpen(_ menu: NSMenu) {
         refreshSnapshot()
@@ -238,6 +285,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func runAction(_ sender: NSMenuItem) {
         guard var args = sender.representedObject as? [String], !args.isEmpty else { return }
         if args[0] == "copy" { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(args[1], forType: .string); return }
+        if args[0] == "dismiss" { actionNotice = nil; actionFailed = false; render(); return }
+        guard !actionRunning else { return }
         if args[0] == "confirm-retry" {
             let alert = NSAlert(); alert.messageText = "Continue this task?"; alert.informativeText = "Review any interrupted command or external action in the conversation before continuing."
             alert.addButton(withTitle: "Continue task"); alert.addButton(withTitle: "Cancel")
@@ -245,19 +294,39 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             args = ["retry", args[1], "--wait"]
         }
+        actionRunning = true; actionFailed = false; actionNotice = "Applying change…"; render()
         let proc = process(args); let pipe = Pipe(); proc.standardOutput = FileHandle.nullDevice; proc.standardError = pipe
         DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
                 try proc.run(); let bytes = pipe.fileHandleForReading.readDataToEndOfFile(); proc.waitUntilExit()
-                if proc.terminationStatus != 0 { DispatchQueue.main.async { self?.message = String(data: bytes, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Action failed. Check relay events."; self?.render() } }
-            } catch { DispatchQueue.main.async { self?.message = "Could not run that action."; self?.render() } }
+                let failed = proc.terminationStatus != 0
+                let detail = String(data: bytes, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                DispatchQueue.main.async {
+                    self?.actionRunning = false; self?.actionFailed = failed
+                    self?.actionNotice = failed ? (detail.isEmpty ? "Action failed. Check relay events." : detail) : MenuController.successMessage(args)
+                    self?.render(); self?.refreshSnapshot()
+                }
+            } catch { DispatchQueue.main.async { self?.actionRunning = false; self?.actionFailed = true; self?.actionNotice = "Could not run that action."; self?.render() } }
+        }
+    }
+    static func successMessage(_ args: [String]) -> String {
+        switch args.first {
+        case "switch": return "Account switched."
+        case "pause": return "Recovery paused. Current work can finish."
+        case "unpause": return "Recovery resumed."
+        case "retry": return "Task allowed to continue."
+        case "restart": return "Session restarted."
+        case "refresh": return "Allowance check finished. See each account’s last checked time."
+        case "account": return args.dropFirst().first == "disable" ? "Account disabled for future routing." : "Account enabled for routing."
+        default: return "Change applied."
         }
     }
     @objc func toggleLogin() {
         let enabled = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.relay.menu.plist")
-        runCommand(enabled ? ["menubar", "--no-startup", "--configure-only"] : ["menubar", "--configure-only"])
+        let sender = NSMenuItem()
+        sender.representedObject = enabled ? ["menubar", "--no-startup", "--configure-only"] : ["menubar", "--configure-only"]
+        runAction(sender)
     }
-    func runCommand(_ args: [String]) { let proc = process(args); proc.standardOutput = FileHandle.nullDevice; proc.standardError = FileHandle.nullDevice; try? proc.run() }
     @objc func quitMenu() { stopping = true; reconnect?.cancel(); stream?.terminate(); NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) { stopping = true; stream?.terminate() }
 }
@@ -281,7 +350,28 @@ if CommandLine.arguments.contains("--self-check") {
     let scheduled = MenuController.accountTimingRows(["next_check": 2000200000.0])
     let correctTiming = timing.map { $0.title } == ["Short reset", "Weekly reset", "Allowance checked when needed"] && scheduled.first?.title == "Next allowance check" && scheduled.first?.at == 2000200000.0
     print("Empty retry schedule handled: \(correctTiming)")
-    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming ? 0 : 1)
+    func findAction(_ args: [String], in menu: NSMenu) -> NSMenuItem? {
+        for entry in menu.items {
+            if entry.representedObject as? [String] == args { return entry }
+            if let child = entry.submenu, let found = findAction(args, in: child) { return found }
+        }
+        return nil
+    }
+    let controller = MenuController()
+    controller.current = ["accounts": [["id": "one", "name": "One"], ["id": "two", "name": "Two"], ["id": "off", "enabled": false]], "sessions": [["id": "live", "account": "one", "running": true], ["id": "stopped", "running": false]]]
+    let controls = controller.makeMenu()
+    let switchArgs = ["switch", "live", "--account", "two", "--wait"]
+    let correctChoices = findAction(switchArgs, in: controls)?.isEnabled == true && findAction(["switch", "live", "--account", "one", "--wait"], in: controls)?.state == .on && findAction(["switch", "live", "--account", "off", "--wait"], in: controls)?.isEnabled == false
+    let stoppedControls = findAction(["restart", "stopped", "--if-stopped"], in: controls) != nil && findAction(["pause", "stopped", "--wait"], in: controls) == nil
+    controller.actionRunning = true; controller.actionNotice = "Applying change…"
+    let pending = controller.makeMenu()
+    let correctPending = findAction(switchArgs, in: pending)?.isEnabled == false && findAction(["refresh"], in: pending)?.isEnabled == false && findAction(["copy", "relay attach live"], in: pending)?.isEnabled == true
+    controller.actionRunning = false; controller.actionNotice = "Task is busy."
+    controller.current["at"] = 2000000001.0
+    let retainedResult = controller.makeMenu().items.contains { $0.title == "Task is busy." }
+    print("Account choices and stopped controls correct: \(correctChoices && stoppedControls)")
+    print("Pending action protected and result retained: \(correctPending && retainedResult)")
+    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = MenuController(); app.delegate = delegate; app.run()

@@ -1,5 +1,13 @@
 # Changes
 
+## 0.6.0
+
+- Add Bash and Zsh completion for management commands, saved identifiers, and native Codex arguments.
+- Add account switching and routing controls to the menu, with visible pending and completed results.
+- Offer restart for stopped workers and retain their displayed account identity.
+- Reject manual switches if work starts during allowance/credential reads or while waiting for authentication.
+- Serialize automatic continuation with authentication changes and return specific, allowlisted control rejections.
+
 ## 0.5.3
 
 - Show short and weekly reset times separately from scheduled allowance checks.

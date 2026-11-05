@@ -24,7 +24,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.5.3"
+VERSION = "0.6.0"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -43,6 +43,21 @@ CONTINUE = (
 
 class RouterError(Exception):
     """A message safe to display; never include a server error or credential."""
+
+
+CONTROL_REJECTIONS = {
+    "unknown_account": "That account is no longer enrolled. Check relay list.",
+    "busy": "Session is busy; switch after its current work and approvals finish.",
+    "account_unavailable": "Account is disabled, under maintenance, or unavailable for this model.",
+    "allowance_exhausted": "Account allowance is exhausted. Choose another account or wait for its reset.",
+    "account_full": "Account session capacity is full or its routing settings changed.",
+}
+
+
+class ControlRejected(RouterError):
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(CONTROL_REJECTIONS[reason])
 
 
 class RecoveryTransition(Exception):
@@ -682,9 +697,12 @@ class Controller:
                     try:
                         await self.control(op, params)
                         self.pool.ack(command, "done")
-                    except Exception:
-                        self.pool.ack(command, "failed")
-                        self.note("control_failed", operation=op)
+                    except Exception as error:
+                        reason = (
+                            error.reason if isinstance(error, ControlRejected) else None
+                        )
+                        self.pool.ack(command, "failed", reason=reason)
+                        self.pool.record("control_failed", operation=op, reason=reason)
             if self.lifecycle_check:
                 await self.lifecycle_check()
                 if self.stopping.is_set():
@@ -781,9 +799,9 @@ class Controller:
                 (i for i, a in enumerate(self.accounts) if a.label == label), None
             )
             if index is None:
-                raise RouterError("Unknown account")
+                raise ControlRejected("unknown_account")
             if self.active_threads or self.active_items or self.server_requests:
-                raise RouterError("Session is busy; switch at an idle boundary")
+                raise ControlRejected("busy")
             options = self.pool.options(label) if self.pool else {}
             model = self.model_for(thread) if thread else None
             if (
@@ -793,19 +811,17 @@ class Controller:
                 and model
                 and model not in options["models"]
             ):
-                raise RouterError(
-                    "Account is disabled, under maintenance, or unavailable for this model"
-                )
+                raise ControlRejected("account_unavailable")
             if limited(await self.accounts[index].usage(force=True), model):
-                raise RouterError("Account allowance is exhausted")
+                raise ControlRejected("allowance_exhausted")
             if self.pool and not self.pool.reserve(
                 label,
                 limit=options.get("max_sessions")
                 or self.preferences["max_sessions_per_account"],
             ):
-                raise RouterError("Account capacity is full or maintenance has started")
+                raise ControlRejected("account_full")
             try:
-                await self.login(index)
+                await self.login(index, idle_only=True)
             finally:
                 if self.pool:
                     self.pool.release_reservation()
@@ -910,19 +926,39 @@ class Controller:
     def account(self):
         return self.accounts[self.index]
 
-    async def login(self, index):
+    async def login(self, index, *, idle_only=False):
         # A sent login cannot be undone by cancelling its waiter. Complete the
         # state transition before allowing a new user turn to use this backend.
-        task = asyncio.create_task(self._login(index))
+        task = asyncio.create_task(self._login(index, idle_only=idle_only))
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             await task
             raise
 
-    async def _login(self, index):
+    async def _login(self, index, *, idle_only=False):
         async with self.login_lock:
             credentials = await self.accounts[index].credentials()
+            # An allowance or credential read can outlast the idle boundary.
+            # User turns use this same lock; validate again before sending tokens.
+            if idle_only and (
+                self.active_threads or self.active_items or self.server_requests
+            ):
+                raise ControlRejected("busy")
+            if idle_only and self.pool:
+                options = self.pool.options(self.accounts[index].label)
+                thread = next(reversed(self.last_turn), None)
+                model = self.model_for(thread) if thread else None
+                if (
+                    not options.get("enabled", True)
+                    or options.get("maintenance")
+                    or (
+                        options.get("models")
+                        and model
+                        and model not in options["models"]
+                    )
+                ):
+                    raise ControlRejected("account_unavailable")
             await self.backend.call(
                 "account/login/start", {"type": "chatgptAuthTokens", **credentials}
             )
@@ -1174,10 +1210,28 @@ class Controller:
                 params[key] = self.thread_settings[thread][key]
         params["clientUserMessageId"] = str(uuid.uuid4())
         baseline = self.turn_ids.get(thread) or "__unknown_before_submission__"
-        self.pending_intents[thread] = {"baseline": baseline, "accepted": False}
-        self.persist(thread, accepted=False, state="submitting", baseline=baseline)
         try:
-            result = await self.backend.call("turn/start", params)
+            while True:
+                async with self.login_lock:
+                    if not self.can_continue(thread, generation):
+                        return
+                    if not (
+                        self.active_threads or self.active_items or self.server_requests
+                    ):
+                        self.pending_intents[thread] = {
+                            "baseline": baseline,
+                            "accepted": False,
+                        }
+                        self.persist(
+                            thread,
+                            accepted=False,
+                            state="submitting",
+                            baseline=baseline,
+                        )
+                        result = await self.backend.call("turn/start", params)
+                        break
+                if not await self.wait_idle(generation):
+                    return
             turn = result.get("turn", {})
             if turn.get("id"):
                 self.turn_ids[thread] = turn["id"]
@@ -2242,6 +2296,18 @@ def selected_binary(args, state):
 def main():
     os.umask(0o077)
     argv = sys.argv[1:]
+    if argv[:1] == ["completion"]:
+        import completion
+
+        args = parser().parse_args(argv)
+        print(completion.script(args.shell))
+        return 0
+    if argv[:1] == ["_complete"]:
+        import completion
+
+        words = argv[2:] if argv[1:2] == ["--"] else argv[1:]
+        print("\n".join(completion.candidates(words, STATE)))
+        return 0
     if argv[:2] == ["help", "run"]:
         argv = ["run", "--help"]
     before_separator = argv[: argv.index("--")] if "--" in argv else argv

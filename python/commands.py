@@ -103,6 +103,7 @@ def snapshot(state, include_inactive=False):
                     "enabled": options.get("enabled", True),
                     "priority": options.get("priority", 0),
                     "max_sessions": options.get("max_sessions", 0),
+                    "models": options.get("models", []),
                     "sessions": sum(s["account"] == label for s in sessions),
                     "primary": windows.get("primary"),
                     "secondary": windows.get("secondary"),
@@ -119,6 +120,7 @@ def snapshot(state, include_inactive=False):
             )
         with pool.db() as db:
             for session in sessions:
+                session["running"] = True
                 account = next(
                     (a for a in accounts if a["id"] == session.get("account")), {}
                 )
@@ -154,6 +156,8 @@ def snapshot(state, include_inactive=False):
             if not include_inactive and job.get("state") != "needs_attention":
                 continue
             prior = saved.get(ident, {})
+            account_id = prior.get("account") or job.get("first") or ""
+            account = next((a for a in accounts if a["id"] == account_id), {})
             sessions.append(
                 {
                     "id": ident,
@@ -161,7 +165,9 @@ def snapshot(state, include_inactive=False):
                     "name": job.get("name", ident[:10]),
                     "cwd": job.get("cwd"),
                     "thread": job.get("resume"),
-                    "account": prior.get("account") or job.get("first") or "",
+                    "account": account_id,
+                    "account_name": account.get("name", account_id),
+                    "account_email": account.get("email"),
                     "model": prior.get("model"),
                     "state": job.get("state", "unknown"),
                     "paused": prior.get("paused", False),
@@ -558,6 +564,13 @@ async def group(args, state, binary):
 
 
 def add_parsers(sub):
+    completion = sub.add_parser(
+        "completion",
+        help="Generate shell completion for Relay and native Codex arguments",
+    )
+    completion.add_argument("shell", choices=["zsh", "bash"])
+    complete = sub.add_parser("_complete", help=__import__("argparse").SUPPRESS)
+    complete.add_argument("words", nargs="...")
     preview = sub.add_parser(
         "explain", help="Preview a native Codex launch without starting a task"
     )

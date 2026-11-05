@@ -65,6 +65,14 @@ relay attach --takeover SESSION_ID
 Accounts show their saved email addresses. The watch view updates only when local
 status changes; it uses no model allowance. The menu bar uses an icon and opens
 at Mac login. `relay menubar --no-startup --configure-only` disables login startup.
+Use a session's menu to switch accounts after its work finishes. Account menus can
+enable or disable future routing without stopping current tasks. Actions show
+their result, and stopped workers offer a restart.
+
+For tab completion in Zsh, run `source <(relay completion zsh)` after `compinit`.
+Bash users can run `source <(relay completion bash)`. Add the same line to your
+shell's startup file to keep it enabled. Relay completes its own commands and
+saved account/session names; arguments after `relay run --` use Codex's completion.
 
 ## What happens when something stops?
 

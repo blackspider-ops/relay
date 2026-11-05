@@ -9,10 +9,20 @@ relay help workspace
 relay run --help
 relay run -- exec --help
 relay help codex resume
+relay completion zsh
+relay completion bash
 ```
 
 `relay run --help` shows the installed Codex command and flag list, followed by
 Relay's launch options. Put native arguments after `relay run --`.
+
+Enable tab completion with `source <(relay completion zsh)` after Zsh's `compinit`,
+or `source <(relay completion bash)` in Bash. Put that line in `.zshrc` or `.bashrc`
+to load it in new shells. Management choices come from Relay's parser and local
+saved metadata, including account labels/emails, sessions, profiles and workspaces.
+Native arguments use the installed Codex completion, loaded once per shell on
+first use; start a new shell after updating Codex to load its new completion.
+Completion does not read Keychain credentials, fetch allowance, or start a task.
 
 ## Accounts
 
@@ -99,6 +109,16 @@ allowance and does not fetch account allowance. `refresh` explicitly checks it.
 The menu uses one local status stream, a template icon, and native session actions.
 Opening it reads a fresh local snapshot, and visible rows update in place.
 Short-window and weekly allowance are labeled separately.
+Each session menu can switch to another enabled account after work and approvals
+finish. The worker checks allowance and session capacity before switching, then
+checks again that the session is idle before changing its login. Rejected actions
+show their reason. Pending menu actions cannot be submitted twice, and results
+remain visible until dismissed or another action starts. Stopped workers offer
+Restart; restarting retains any review hold.
+
+Account menus can disable or enable future routing. Disabling an account does not
+interrupt work already using it. The account chooser marks the current account
+and disables accounts excluded by their saved routing/model settings.
 It opens at Mac login after `relay menubar`; disable that in its menu or with
 `relay menubar --no-startup --configure-only`.
 

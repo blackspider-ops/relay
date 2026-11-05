@@ -42,6 +42,20 @@ Check `relay --version` and update Relay. Watch now prints only meaningful chang
 from local state, without using model allowance. Earlier enrolled accounts can be
 identified with `relay account identify`; this reads saved login metadata locally.
 
+**Switching accounts says the task is busy.**
+
+Wait for its current work, tools and approvals to finish, then switch again.
+Relay rechecks this after checking the target account, so work starting during
+that check also prevents switching. A rejected menu action keeps its explanation
+visible. Use Restart for a stopped worker rather than sending it live controls.
+
+**Tab completion is missing.**
+
+Load `source <(relay completion zsh)` after `compinit`, or use
+`source <(relay completion bash)`. Put native arguments after `relay run --`.
+Native completion has the same choices and limitations as Codex's own generated
+completion. Start a new shell after a Codex update to reload those choices.
+
 **Why does npm ask for authentication?**
 
 That verification protects package publishing. Installing and running the public
