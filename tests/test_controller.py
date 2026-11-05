@@ -451,15 +451,22 @@ class NativeTransportTests(unittest.IsolatedAsyncioTestCase):
         await self.rpc.close()
         self.tmp.cleanup()
 
+    async def completed_turn(self, thread):
+        async with asyncio.timeout(5):
+            while True:
+                result = await self.rpc.call(
+                    "thread/turns/list", {"threadId": thread, "limit": 1}
+                )
+                if result["data"] and result["data"][0]["status"] == "completed":
+                    return result["data"][0]
+                await asyncio.sleep(0.02)
+
     async def test_actual_jsonl_pipe_roundtrip_and_persisted_history(self):
         result = await self.rpc.call("thread/start", {"cwd": str(self.home)})
         thread = result["thread"]["id"]
         await self.rpc.call("turn/start", {"threadId": thread, "input": []})
-        await asyncio.sleep(0.06)
-        result = await self.rpc.call(
-            "thread/turns/list", {"threadId": thread, "limit": 1}
-        )
-        self.assertEqual(result["data"][0]["status"], "completed")
+        result = await self.completed_turn(thread)
+        self.assertEqual(result["status"], "completed")
 
     async def test_watchdog_clears_stale_active_thread_from_native_status(self):
         result = await self.rpc.call("thread/start", {"cwd": str(self.home)})
@@ -503,9 +510,8 @@ class NativeTransportTests(unittest.IsolatedAsyncioTestCase):
                     value = json.loads(await ws.recv())
                     if value.get("id") == 1:
                         break
-            await asyncio.sleep(0.1)
+            latest = await self.completed_turn(thread)
             self.assertEqual(c.user_generation, 1)
-            latest = await c.latest(thread)
             self.assertEqual(latest["status"], "completed")
 
 
