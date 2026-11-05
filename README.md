@@ -13,7 +13,7 @@ Python 3.11 or newer. If you use Homebrew, `brew install node python@3.13` insta
 Node and Python.
 
 ```sh
-npm install -g github:blackspider-ops/relay#v0.4.1
+npm install -g relay-codex
 relay setup --count 2
 relay run
 ```
@@ -28,8 +28,8 @@ Your usual `codex` command keeps working.
 Prefer trying it without a global install?
 
 ```sh
-npx --yes github:blackspider-ops/relay#v0.4.1 setup --count 2
-npx --yes github:blackspider-ops/relay#v0.4.1 run
+npx --yes relay-codex setup --count 2
+npx --yes relay-codex run
 ```
 
 ## Use it like Codex
@@ -92,6 +92,7 @@ in your private Application Support folder. Never share that folder.
 
 Relay checks the installed Codex version and keeps a working copy for running
 sessions. Future Codex changes may still need a Relay update.
+Update Relay with `npm install -g relay-codex@latest`.
 
 This is an independent tool, not an OpenAI product. Short local tests cover
 parallel tasks and recovery; they are not an overnight reliability guarantee.

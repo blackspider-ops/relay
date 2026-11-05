@@ -1,5 +1,8 @@
 # Sharing Relay
 
+Relay is published on npm as [relay-codex](https://www.npmjs.com/package/relay-codex).
+Friends can run `npx relay-codex` or install it with `npm install -g relay-codex`.
+
 ## GitHub and npx
 
 The GitHub repository is enough for friends to install or try Relay:
