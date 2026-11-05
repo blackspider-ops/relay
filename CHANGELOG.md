@@ -1,5 +1,10 @@
 # Changes
 
+## 0.5.3
+
+- Show short and weekly reset times separately from scheduled allowance checks.
+- Replace an empty check schedule with “Allowance checked when needed”; ignore null timestamps.
+
 ## 0.5.2
 
 - Update open menu rows in place and refresh the local snapshot when opening the menu.

@@ -127,8 +127,28 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         entry.target = self; entry.representedObject = args
         entry.identifier = NSUserInterfaceItemIdentifier("action:" + args.joined(separator: "|")); menu.addItem(entry)
     }
+    struct TimingRow {
+        let title: String
+        let at: Double?
+    }
+    static func timestamp(_ value: Any?) -> Double? {
+        guard let seconds = value as? Double, seconds.isFinite, seconds > 0 else { return nil }
+        return seconds
+    }
+    static func accountTimingRows(_ account: [String: Any]) -> [TimingRow] {
+        var rows: [TimingRow] = []
+        if let primary = account["primary"] as? [String: Any], let at = timestamp(primary["resetsAt"]) {
+            rows.append(TimingRow(title: "Short reset", at: at))
+        }
+        if let secondary = account["secondary"] as? [String: Any], let at = timestamp(secondary["resetsAt"]) {
+            rows.append(TimingRow(title: "Weekly reset", at: at))
+        }
+        if let at = timestamp(account["next_check"]) { rows.append(TimingRow(title: "Next allowance check", at: at)) }
+        else { rows.append(TimingRow(title: "Allowance checked when needed", at: nil)) }
+        return rows
+    }
     func date(_ value: Any?) -> String {
-        guard let seconds = value as? Double else { return "unknown" }
+        guard let seconds = MenuController.timestamp(value) else { return "Not available" }
         return Date(timeIntervalSince1970: seconds).formatted(date: .abbreviated, time: .shortened)
     }
     func countdown(_ title: String, value: Any, into menu: NSMenu) {
@@ -140,8 +160,9 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for entry in menu.items {
             if let data = entry.representedObject as? [String: Any], let at = data["at"] as? Double, let label = data["label"] as? String {
                 let seconds = max(0, Int(at - Date().timeIntervalSince1970))
-                let remaining = seconds < 60 ? "under a minute" : seconds < 3600 ? "\(seconds / 60)m" : "\(seconds / 3600)h \((seconds % 3600) / 60)m"
-                entry.title = label + ": " + (seconds == 0 ? "due now" : "in " + remaining) + " · " + date(at)
+                let remaining = seconds < 60 ? "under a minute" : seconds < 3600 ? "\(seconds / 60)m" : seconds < 86400 ? "\(seconds / 3600)h \((seconds % 3600) / 60)m" : "\(seconds / 86400)d \((seconds % 86400) / 3600)h"
+                let elapsed = label.contains("reset") ? "reported time passed" : "due now"
+                entry.title = label + ": " + (seconds == 0 ? elapsed : "in " + remaining) + " · " + date(at)
             }
             if let child = entry.submenu { updateTimes(child) }
         }
@@ -168,8 +189,12 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let email = account["email"] as? String { text(email, into: submenu) }
             text("Short window: \(remaining)", into: submenu)
             if weekly != "?" { text("Weekly window: \(weekly) left", into: submenu) }
-            if let reset = account["next_check"] { countdown("Next check", value: reset, into: submenu) }
-            text("Last checked: \(date(account["usage_checked_at"]))", into: submenu)
+            for row in MenuController.accountTimingRows(account) {
+                if let at = row.at { countdown(row.title, value: at, into: submenu) }
+                else { text(row.title, into: submenu) }
+            }
+            let lastChecked = MenuController.timestamp(account["usage_checked_at"]).map { date($0) } ?? "Not checked yet"
+            text("Last checked: \(lastChecked)", into: submenu)
             let entry = NSMenuItem(title: "\(name) · \(label)", action: nil, keyEquivalent: "")
             entry.identifier = NSUserInterfaceItemIdentifier("account:" + (account["id"] as? String ?? name))
             entry.submenu = submenu; menu.addItem(entry)
@@ -182,7 +207,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let submenu = NSMenu()
             text("Account: \(session["account_name"] as? String ?? session["account"] as? String ?? "unknown")", into: submenu)
             text("Model: \(session["model"] as? String ?? "unknown")", into: submenu)
-            if let next = session["next_wake"] { countdown("Next action", value: next, into: submenu) }
+            if let next = MenuController.timestamp(session["next_wake"]) { countdown("Next action", value: next, into: submenu) }
             if let reason = session["reason"] as? String { text(reason.replacingOccurrences(of: "_", with: " "), into: submenu) }
             action("Copy reconnect command", args: ["copy", "relay attach " + id], into: submenu)
             action("Pause recovery", args: ["pause", id, "--wait"], into: submenu)
@@ -199,6 +224,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.relay.menu.plist") ? .on : .off
         menu.addItem(login)
         let quit = NSMenuItem(title: "Quit Relay menu", action: #selector(quitMenu), keyEquivalent: "q"); quit.target = self; menu.addItem(quit)
+        updateTimes(menu)
         if let visible = item.menu { MenuController.synchronise(visible, with: menu) }
         else { item.menu = menu }
     }
@@ -251,7 +277,11 @@ if CommandLine.arguments.contains("--self-check") {
     MenuController.synchronise(visible, with: replacement)
     let safeIdentity = visible.items[0] !== existing && visible.items[0].identifier == newItem.identifier
     print("Session action identity preserved: \(safeIdentity)")
-    exit(normal != nil && attention != nil && liveUpdate && safeIdentity ? 0 : 1)
+    let timing = MenuController.accountTimingRows(["next_check": NSNull(), "primary": ["resetsAt": 2000000000.0], "secondary": ["resetsAt": 2000100000.0]])
+    let scheduled = MenuController.accountTimingRows(["next_check": 2000200000.0])
+    let correctTiming = timing.map { $0.title } == ["Short reset", "Weekly reset", "Allowance checked when needed"] && scheduled.first?.title == "Next allowance check" && scheduled.first?.at == 2000200000.0
+    print("Empty retry schedule handled: \(correctTiming)")
+    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = MenuController(); app.delegate = delegate; app.run()
