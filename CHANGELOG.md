@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.1
+
+- Keep manual review required after a worker crash during an external action.
+- Recognize capacity status codes as well as the displayed message.
+
 ## 0.4.0
 
 - First public release as Relay.

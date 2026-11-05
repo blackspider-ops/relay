@@ -1,20 +1,49 @@
 {
   "name": "relay-codex",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Keep your Codex sessions moving between your own accounts.",
   "license": "MIT",
   "author": "blackspider-ops",
-  "repository": {"type": "git", "url": "https://github.com/blackspider-ops/relay.git"},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/blackspider-ops/relay.git"
+  },
   "homepage": "https://github.com/blackspider-ops/relay#readme",
-  "bugs": {"url": "https://github.com/blackspider-ops/relay/issues"},
-  "bin": {"relay": "bin/relay.cjs"},
-  "files": ["bin/*.cjs", "python/*.py", "python/*.swift", "python/*.lock", "python/*.txt", "tests/*.py", "README.md", "LICENSE", "docs/*.md", "assets/*.svg"],
-  "engines": {"node": ">=20"},
-  "os": ["darwin"],
-  "keywords": ["codex", "terminal", "accounts", "macos"],
+  "bugs": {
+    "url": "https://github.com/blackspider-ops/relay/issues"
+  },
+  "bin": {
+    "relay": "bin/relay.cjs"
+  },
+  "files": [
+    "bin/*.cjs",
+    "python/*.py",
+    "python/*.swift",
+    "python/*.lock",
+    "python/*.txt",
+    "tests/*.py",
+    "README.md",
+    "LICENSE",
+    "docs/*.md",
+    "assets/*.svg"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "darwin"
+  ],
+  "keywords": [
+    "codex",
+    "terminal",
+    "accounts",
+    "macos"
+  ],
   "scripts": {
     "test": "node --test tests/bootstrap.test.cjs",
     "check": "node scripts/check-release.cjs"
   },
-  "publishConfig": {"access": "public"}
+  "publishConfig": {
+    "access": "public"
+  }
 }

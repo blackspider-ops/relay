@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const version = require('../package.json').version;
 const { stateDirectory, fingerprint, ownerAlive, withSetupLock } = require('../bin/relay.cjs');
 
 test('fresh installs use Relay; existing account homes stay in place', () => {
@@ -18,7 +19,8 @@ test('fresh installs use Relay; existing account homes stay in place', () => {
 
 test('runtime identity includes the shipped code and locked dependencies', () => {
   const bundle = fingerprint();
-  assert.match(bundle.id, /^0\.4\.0-[a-f0-9]{16}$/);
+  assert.ok(bundle.id.startsWith(version + '-'));
+  assert.match(bundle.id.slice(version.length + 1), /^[a-f0-9]{16}$/);
   assert.ok(bundle.names.includes('requirements.lock'));
   assert.ok(bundle.names.includes('router.py'));
   assert.ok(!bundle.names.some(name => name.startsWith('test_')));
@@ -53,6 +55,6 @@ test('interrupted setup locks are recoverable and process identity is checked', 
 test('version works before Python setup and needs no account login', () => {
   const result = spawnSync(process.execPath, [path.join(__dirname, '../bin/relay.cjs'), '--version'], { encoding: 'utf8' });
   if (process.platform === 'darwin') {
-    assert.equal(result.status, 0); assert.equal(result.stdout.trim(), 'Relay 0.4.0');
+    assert.equal(result.status, 0); assert.equal(result.stdout.trim(), `Relay ${version}`);
   } else { assert.notEqual(result.status, 0); }
 });

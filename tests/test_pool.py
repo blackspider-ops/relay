@@ -229,7 +229,6 @@ class PoolTests(unittest.TestCase):
             "misalignmentPolicyViolation",
             "badRequest",
             "sandboxError",
-            "policyCapacityUnavailable",
             None,
         ]:
             self.assertIsNone(failure_kind(code))

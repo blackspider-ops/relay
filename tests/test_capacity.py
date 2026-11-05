@@ -19,8 +19,14 @@ from test_services import wait_for
 
 class CapacityClassifierTests(unittest.TestCase):
     def test_structured_and_exact_legacy_capacity_errors(self):
-        self.assertIsNone(failure_kind("policyCapacityUnavailable"))
-        for code in (None, "other", "policyCapacityUnavailable"):
+        self.assertEqual(failure_kind("policyCapacityUnavailable"), "capacity")
+        for code in (
+            None,
+            "other",
+            "policyCapacityUnavailable",
+            "serverOverloaded",
+            "flexUnavailable",
+        ):
             for message in (CAPACITY_MESSAGE, "■ " + CAPACITY_MESSAGE):
                 self.assertEqual(failure_kind(code, message), "capacity")
 

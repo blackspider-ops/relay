@@ -23,7 +23,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate
 import settings
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"

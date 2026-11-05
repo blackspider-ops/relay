@@ -571,8 +571,30 @@ async def _serve(state, ident, binary):
                     spec["state"] = "running"
                     atomic_json(spec_path, spec)
             elif old_thread:
-                state_name, turn = await controller.reconcile(thread_id)
-                if persisted.get("state") in {"retry_scheduled", "waiting_for_reset"}:
+                state_name, turn = await controller.reconcile(
+                    thread_id,
+                    baseline=persisted.get("baseline")
+                    if not persisted.get("accepted")
+                    else None,
+                )
+                if state_name == "completed":
+                    controller.persist(
+                        thread_id,
+                        state="completed",
+                        accepted=True,
+                        active_items=False,
+                        next_wake=None,
+                        kind=None,
+                        episode=None,
+                    )
+                elif persisted.get("active_items") or not persisted.get("accepted"):
+                    controller.paused_uncertain.add(thread_id)
+                    controller.note(
+                        "needs_attention",
+                        reason="worker_restarted_during_uncertain_action",
+                        thread=thread_id,
+                    )
+                elif persisted.get("state") in {"retry_scheduled", "waiting_for_reset"}:
                     controller.recovery = asyncio.create_task(
                         controller.restore_recovery(thread_id, persisted)
                     )
@@ -589,20 +611,12 @@ async def _serve(state, ident, binary):
                                 thread_id, controller.user_generation, kind
                             )
                         )
-                elif state_name != "completed":
-                    if persisted.get("active_items") or not persisted.get("accepted"):
-                        controller.paused_uncertain.add(thread_id)
-                        controller.note(
-                            "needs_attention",
-                            reason="worker_restarted_during_uncertain_action",
-                            thread=thread_id,
+                elif persisted.get("state") not in {"completed", "idle"}:
+                    controller.recovery = asyncio.create_task(
+                        controller.continue_thread(
+                            thread_id, controller.user_generation
                         )
-                    elif persisted.get("state") not in {"completed", "idle"}:
-                        controller.recovery = asyncio.create_task(
-                            controller.continue_thread(
-                                thread_id, controller.user_generation
-                            )
-                        )
+                    )
             await controller.stopping.wait()
         spec["state"] = "stopped"
         atomic_json(spec_path, spec)

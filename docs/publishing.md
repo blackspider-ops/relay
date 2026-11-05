@@ -5,8 +5,8 @@
 The GitHub repository is enough for friends to install or try Relay:
 
 ```sh
-npm install -g github:blackspider-ops/relay#v0.4.0
-npx --yes github:blackspider-ops/relay#v0.4.0 --version
+npm install -g github:blackspider-ops/relay#v0.4.1
+npx --yes github:blackspider-ops/relay#v0.4.1 --version
 ```
 
 `npx` runs packages. It is not a separate publishing service. Publishing the

@@ -243,6 +243,94 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             pool.close()
 
+    async def test_worker_restore_keeps_review_pause_even_if_latest_error_is_recoverable(
+        self,
+    ):
+        history = self.home / "fake-history.json"
+        await wait_for(
+            lambda: any(
+                t["turns"] and t["turns"][-1]["status"] == "completed"
+                for t in json.loads(history.read_text())["threads"].values()
+            )
+        )
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        saved = json.loads(history.read_text())
+        thread = next(iter(saved["threads"]))
+        saved["threads"][thread]["turns"][-1].update(
+            status="failed",
+            error={"codexErrorInfo": "usageLimitExceeded", "message": "synthetic"},
+        )
+        atomic_json(history, saved)
+        pool = Pool(self.state)
+        pool.session = self.ident
+        details = pool.intent(thread)
+        details.update(accepted=True, active_items=True, state="failed")
+        pool.intent(thread, details)
+        starts = sum(c["method"] == "turn/start" for c in saved["calls"])
+        self.task = asyncio.create_task(
+            service.serve(self.state, self.ident, self.binary)
+        )
+        await wait_for(self.meta.exists)
+        try:
+            row = next(s for s in pool.detail() if s["id"] == self.ident)
+            self.assertEqual(row["state"], "needs_attention")
+            self.assertEqual(
+                sum(
+                    c["method"] == "turn/start"
+                    for c in json.loads(history.read_text())["calls"]
+                ),
+                starts,
+            )
+        finally:
+            pool.close()
+
+    async def test_restore_distinguishes_old_completion_from_accepted_new_work(self):
+        history = self.home / "fake-history.json"
+        await wait_for(
+            lambda: any(
+                t["turns"] and t["turns"][-1]["status"] == "completed"
+                for t in json.loads(history.read_text())["threads"].values()
+            )
+        )
+        saved = json.loads(history.read_text())
+        thread = next(iter(saved["threads"]))
+        turn = saved["threads"][thread]["turns"][-1]["id"]
+        starts = sum(c["method"] == "turn/start" for c in saved["calls"])
+        pool = Pool(self.state)
+        pool.session = self.ident
+        try:
+            for accepted, expected in [(False, "needs_attention"), (True, "idle")]:
+                self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
+                details = pool.intent(thread)
+                details.update(
+                    accepted=accepted,
+                    active_items=False,
+                    baseline=turn,
+                    state="retry_scheduled" if accepted else "submitting",
+                    next_wake=1,
+                )
+                pool.intent(thread, details)
+                self.task = asyncio.create_task(
+                    service.serve(self.state, self.ident, self.binary)
+                )
+                await wait_for(self.meta.exists)
+                self.assertEqual(
+                    next(s for s in pool.detail() if s["id"] == self.ident)["state"],
+                    expected,
+                )
+                self.assertEqual(
+                    sum(
+                        c["method"] == "turn/start"
+                        for c in json.loads(history.read_text())["calls"]
+                    ),
+                    starts,
+                )
+        finally:
+            pool.session = "inspector"
+            pool.close()
+
     async def test_selected_thread_restores_its_own_model_and_permissions(self):
         await wait_for(lambda: json.loads(self.job.read_text()).get("resume"))
         thread = json.loads(self.job.read_text())["resume"]

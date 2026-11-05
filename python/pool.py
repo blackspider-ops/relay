@@ -527,10 +527,12 @@ CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model.
 
 
 def failure_kind(info, message=None):
+    if info == "policyCapacityUnavailable":
+        return "capacity"
     # Older/generic error envelopes can omit the enum. Match only the known
     # terminal capacity message, never broad words like "policy" or "capacity".
     if (
-        info in (None, "other", "policyCapacityUnavailable")
+        info in (None, "other", "serverOverloaded", "flexUnavailable")
         and isinstance(message, str)
         and message.strip().removeprefix("■").strip() == CAPACITY_MESSAGE
     ):
