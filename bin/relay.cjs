@@ -91,8 +91,9 @@ async function withSetupLock(state, operation) {
   finally { fs.rmSync(lock, { recursive: true, force: true }); }
 }
 
-function run(command, args) {
-  const result = spawnSync(command, args, { stdio: 'inherit' });
+function runSetup(command, args) {
+  // Setup chatter must not contaminate JSON or generated completion on stdout.
+  const result = spawnSync(command, args, { stdio: ['inherit', 2, 'inherit'] });
   if (result.error || result.status !== 0) throw new Error('Setup did not finish. Run Relay again to retry.');
 }
 
@@ -114,8 +115,8 @@ async function prepare(state) {
     }
     console.error('Preparing Relay for this Mac. This only happens on first use or after an update.');
     // Always retry dependency installation if a previous setup was interrupted.
-    run(python, ['-m', 'venv', path.join(destination, '.venv')]);
-    run(interpreter, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', path.join(destination, 'requirements.lock')]);
+    runSetup(python, ['-m', 'venv', path.join(destination, '.venv')]);
+    runSetup(interpreter, ['-m', 'pip', 'install', '--disable-pip-version-check', '-r', path.join(destination, 'requirements.lock')]);
     fs.writeFileSync(marker, JSON.stringify({ version: pkg.version }), { mode: 0o600 });
     return { interpreter, router: path.join(destination, 'router.py') };
   });
@@ -144,5 +145,5 @@ async function main() {
   process.off('SIGHUP', terminate);
 }
 
-module.exports = { stateDirectory, fingerprint, ownerAlive, withSetupLock, prepare };
+module.exports = { stateDirectory, fingerprint, ownerAlive, withSetupLock, prepare, runSetup };
 if (require.main === module) main().catch(error => { console.error(`relay: ${error.message}`); process.exitCode = 1; });

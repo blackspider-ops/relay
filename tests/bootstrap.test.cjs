@@ -58,3 +58,13 @@ test('version works before Python setup and needs no account login', () => {
     assert.equal(result.status, 0); assert.equal(result.stdout.trim(), `Relay ${version}`);
   } else { assert.notEqual(result.status, 0); }
 });
+
+test('dependency setup leaves stdout clean for completion and JSON', () => {
+  const bootstrap = path.resolve(__dirname, '../bin/relay.cjs');
+  const code = `require(${JSON.stringify(bootstrap)}).runSetup(process.execPath, ['-e', 'console.log("setup output"); console.error("setup warning")'])`;
+  const result = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /setup output/);
+  assert.match(result.stderr, /setup warning/);
+});

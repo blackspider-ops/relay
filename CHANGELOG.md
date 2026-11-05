@@ -2,6 +2,7 @@
 
 ## 0.6.0
 
+- Keep dependency setup logs off stdout so first-run completion and JSON remain usable.
 - Add Bash and Zsh completion for management commands, saved identifiers, and native Codex arguments.
 - Add account switching and routing controls to the menu, with visible pending and completed results.
 - Offer restart for stopped workers and retain their displayed account identity.
