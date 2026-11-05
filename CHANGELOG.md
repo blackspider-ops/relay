@@ -1,5 +1,11 @@
 # Changes
 
+## 0.5.1
+
+- Apply an explicit reviewed retry even when a previous retry timer is still pending.
+- Show account emails in session details and recovery messages as well as the account list.
+- Normalize npm repository metadata for trusted publishing.
+
 ## 0.5.0
 
 - Show saved account emails in the dashboard and menu bar.

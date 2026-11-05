@@ -126,7 +126,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let name = session["name"] as? String ?? String(id.prefix(10))
             let status = (session["state"] as? String ?? "unknown").replacingOccurrences(of: "_", with: " ")
             let submenu = NSMenu()
-            text("Account: \(session["account"] as? String ?? "unknown")", into: submenu)
+            text("Account: \(session["account_name"] as? String ?? session["account"] as? String ?? "unknown")", into: submenu)
             text("Model: \(session["model"] as? String ?? "unknown")", into: submenu)
             if let next = session["next_wake"] { countdown("Next action", value: next, into: submenu) }
             if let reason = session["reason"] as? String { text(reason.replacingOccurrences(of: "_", with: " "), into: submenu) }

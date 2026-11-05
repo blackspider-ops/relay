@@ -110,6 +110,13 @@ def snapshot(state, include_inactive=False):
             )
         with pool.db() as db:
             for session in sessions:
+                account = next(
+                    (a for a in accounts if a["id"] == session.get("account")), {}
+                )
+                session["account_name"] = account.get(
+                    "name", session.get("account", "")
+                )
+                session["account_email"] = account.get("email")
                 saved_intent = db.execute(
                     "SELECT details FROM intents WHERE owner=? AND thread=?",
                     (session["id"], session.get("thread", "")),
@@ -198,11 +205,11 @@ def render(value):
     if value["sessions"]:
         lines += [
             "",
-            f"{'SESSION':<12}{'ACCOUNT':<14}{'STATE':<23}{'MODEL':<23}PROJECT / NAME",
+            f"{'SESSION':<12}{'ACCOUNT':<32}{'STATE':<23}{'MODEL':<23}PROJECT / NAME",
         ]
         for row in value["sessions"]:
             lines.append(
-                f"{row['id'][:10]:<12}{row.get('account', ''):<14}{str(row.get('state', 'unknown'))[:22]:<23}{str(row.get('model') or '?')[:22]:<23}{row.get('cwd') or row.get('name') or ''}"
+                f"{row['id'][:10]:<12}{str(row.get('account_name') or row.get('account', '')):<32}{str(row.get('state', 'unknown'))[:22]:<23}{str(row.get('model') or '?')[:22]:<23}{row.get('cwd') or row.get('name') or ''}"
             )
             if row.get("next_wake"):
                 lines.append(

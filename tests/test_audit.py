@@ -45,6 +45,31 @@ class RecoveryRegressions(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(method == "turn/start" for method, _ in backend.calls))
             pool.close()
 
+    async def test_explicit_retry_clears_a_review_hold_during_an_existing_timer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pool = Pool(Path(folder))
+            backend = FakeBackend()
+            c = Controller(
+                [FakeAccount("one")], backend, pool=pool, report=lambda _: None
+            )
+            c.client = FakeClient()
+            c.last_turn["thread-1"] = {"threadId": "thread-1"}
+            c.recovery = asyncio.create_task(c.recover("thread-1", 0, "capacity"))
+            try:
+                while not c.episodes:
+                    await asyncio.sleep(0)
+                c.hold_for_review("thread-1")
+                await c.control("retry", {"thread": "thread-1"})
+                await asyncio.wait_for(c.recovery, 1)
+                self.assertFalse(pool.intent("thread-1")["review_required"])
+                self.assertEqual(
+                    sum(method == "turn/start" for method, _ in backend.calls), 1
+                )
+            finally:
+                c.recovery.cancel()
+                await asyncio.gather(c.recovery, return_exceptions=True)
+                pool.close()
+
     async def test_picker_permission_control_applies_before_thread_selection(self):
         c = Controller([FakeAccount("one")], FakeBackend(), report=lambda _: None)
         c.launch_overrides = {

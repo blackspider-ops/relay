@@ -24,7 +24,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -435,6 +435,17 @@ class Controller:
         self.awake_process = None
         self.fallback_tried = {}
 
+    def account_name(self):
+        if self.pool:
+            from commands import account_identity
+
+            return (
+                account_identity(self.pool.state, self.account.label).get("email")
+                or self.pool.options(self.account.label).get("name")
+                or self.account.label
+            )
+        return self.account.label
+
     def attached(self):
         return bool(self.client) or self.background or self.starting
 
@@ -457,7 +468,7 @@ class Controller:
         if self.preferences.get("notifications"):
             from notifications import notify
 
-            notify(kind, self.account.label)
+            notify(kind, self.account_name())
 
     def merge_settings(self, thread, params):
         allowed = {
@@ -792,6 +803,8 @@ class Controller:
             self.note("switched", to=label)
         elif op == "retry":
             self.paused = False
+            if thread:
+                self.clear_review(thread)
             self.wake.set()
             if self.recovery and not self.recovery.done():
                 self.force_retry.set()
@@ -803,7 +816,6 @@ class Controller:
                 )
                 self.pool.invalidate(self.account.label)
             if thread and (not self.recovery or self.recovery.done()):
-                self.clear_review(thread)
                 self.recovery = asyncio.create_task(
                     self.continue_thread(thread, self.user_generation)
                 )
@@ -1173,7 +1185,7 @@ class Controller:
             raise
         except (RouterError, asyncio.TimeoutError):
             return await self.uncertain(thread, generation, baseline)
-        self.report(f"Continued the saved thread with {self.account.label}.")
+        self.report(f"Continued the saved thread with {self.account_name()}.")
 
     async def restore_recovery(self, thread, persisted):
         """Honor an accepted retry's original deadline after a process restart."""
@@ -1383,7 +1395,7 @@ class Controller:
                     episode["attempt"] += 1
                     target = episode["start"] + episode["attempt"] * self.retry_interval
                     self.report(
-                        f"Service/authentication failure on {self.account.label}. Retry {episode['attempt']}/{self.retry_attempts} at {time.strftime('%H:%M:%S', time.localtime(target))}."
+                        f"Service/authentication failure on {self.account_name()}. Retry {episode['attempt']}/{self.retry_attempts} at {time.strftime('%H:%M:%S', time.localtime(target))}."
                     )
                     self.note(
                         "retry_scheduled",
@@ -1416,7 +1428,7 @@ class Controller:
                 )
             self.episodes.pop(thread, None)
             self.report(
-                f"Selecting another account after {kind} failure on {self.account.label}."
+                f"Selecting another account after {kind} failure on {self.account_name()}."
             )
             self.note("selecting_account", thread=thread, reason=kind)
             await self.mark(self.index, model, kind)
