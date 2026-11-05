@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import broker
 import commands
 from pool import Pool
-from router import Controller, parser, RouterError
+from router import Controller, parser, RouterError, selected_binary
 import service
 from settings import atomic_json
 from test_router import FakeAccount, FakeBackend, FakeClient
@@ -75,6 +75,30 @@ class ModelRules(unittest.IsolatedAsyncioTestCase):
 
 
 class Lifecycle(unittest.IsolatedAsyncioTestCase):
+    def test_helper_does_not_require_global_codex_when_runtime_is_provided(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("router.codex_path", side_effect=RouterError("not installed")):
+                args = parser().parse_args(["_broker", "--binary", "/explicit/runtime"])
+                self.assertEqual(
+                    selected_binary(args, Path(directory)), "/explicit/runtime"
+                )
+
+    def test_saved_worker_and_metadata_commands_survive_missing_global_codex(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            atomic_json(
+                service.folder(state) / "saved.job.json",
+                {"binary": "/saved/native/runtime"},
+            )
+            with patch("router.codex_path", side_effect=RouterError("not installed")):
+                self.assertEqual(
+                    selected_binary(parser().parse_args(["_serve", "saved"]), state),
+                    "/saved/native/runtime",
+                )
+                self.assertIsNone(
+                    selected_binary(parser().parse_args(["status"]), state)
+                )
+
     async def test_compatible_older_coordinator_is_reused_without_interrupting_it(self):
         with tempfile.TemporaryDirectory() as directory:
             with (

@@ -37,7 +37,7 @@ npm install -g relay-codex
 
 ## Homebrew
 
-The release includes a formula under `Formula/`. It can be installed from this
+The repository includes a formula under `Formula/`. It can be installed from this
 repository as a personal tap; it does not need acceptance into Homebrew's main
 collection. The formula must point to a tagged release archive with its actual
 SHA-256 checksum.

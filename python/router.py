@@ -955,6 +955,20 @@ class Controller:
             kind = failure_kind(failure, (turn.get("error") or {}).get("message"))
             if failure == "modelNotFound" and self.preferences.get("fallback_models"):
                 kind = "model"
+            if (
+                turn.get("status") == "failed"
+                and failure is not None
+                and not kind
+                and key in self.seen_failures
+            ):
+                if self.recovery:
+                    self.recovery.cancel()
+                self.episodes.pop(thread, None)
+                self.note(
+                    "needs_attention",
+                    thread=thread,
+                    reason="terminal_error_requires_review",
+                )
             if turn.get("status") == "completed":
                 if (
                     key in self.seen_failures
@@ -1946,6 +1960,56 @@ async def dispatch(args, state, binary):
     return await run_pool(args, state, binary)
 
 
+def selected_binary(args, state):
+    if args.command == "_broker" and args.binary:
+        return args.binary
+    if args.command == "_serve":
+        job = state / "services" / (args.session + ".job.json")
+        if job.exists():
+            binary = json.loads(job.read_text()).get("binary")
+            if binary:
+                return binary
+    if args.command in {
+        "list",
+        "status",
+        "events",
+        "usage",
+        "config",
+        "pause",
+        "unpause",
+        "retry",
+        "wake",
+        "stop",
+        "switch",
+        "restart",
+        "menubar",
+        "_supervise",
+    }:
+        return None
+    if args.command == "group" and args.action != "start":
+        return None
+    if args.command == "runtime" and args.action in {"list", "use"}:
+        return None
+    if (
+        args.command == "account"
+        and args.action not in {"add", "reauth"}
+        and not getattr(args, "revoke", False)
+    ):
+        return None
+    try:
+        return codex_path()
+    except RouterError:
+        import runtime
+
+        for row in reversed(runtime.index(state)["runtimes"]):
+            try:
+                if compatibility.digest(row["binary"]) == row["sha256"]:
+                    return row["binary"]
+            except OSError:
+                continue
+        raise
+
+
 def main():
     os.umask(0o077)
     args = parser().parse_args()
@@ -1960,9 +2024,9 @@ def main():
         raise RouterError(
             "This build uses macOS Keychain and currently supports macOS only."
         )
-    binary = codex_path()
     state = private_dir(STATE)
     private_dir(state / "accounts")
+    binary = selected_binary(args, state)
     if args.command == "list":
         print("\n".join(labels(state)) or "No accounts enrolled.")
         return 0

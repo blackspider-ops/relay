@@ -94,6 +94,25 @@ class CapacityRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.clock.waits, [300])
         self.assertTrue(any(m == "turn/start" for m, _ in self.backend.calls))
 
+    async def test_final_policy_failure_cancels_an_earlier_capacity_retry(self):
+        await self.c.event(
+            {
+                "method": "error",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "willRetry": False,
+                    "error": {
+                        "codexErrorInfo": "policyCapacityUnavailable",
+                        "message": CAPACITY_MESSAGE,
+                    },
+                },
+            }
+        )
+        await self.c.event(completed(code="cyberPolicy"))
+        await asyncio.gather(self.c.recovery, return_exceptions=True)
+        self.assertFalse(any(m == "turn/start" for m, _ in self.backend.calls))
+
     async def test_native_error_and_final_turn_do_not_schedule_two_retries(self):
         params = {
             "threadId": "thread-1",
