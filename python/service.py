@@ -11,6 +11,7 @@ import time
 import uuid
 
 from settings import atomic_json
+from launch import RESUME_FIELDS
 from pool import Pool, process_birth
 from processes import spawn
 
@@ -49,11 +50,18 @@ def start(
         "state": "starting",
         "interactive": interactive,
         "binary": binary,
+        "relay_runtime": str(Path(__file__).parent.resolve()),
     }
     if not Path(spec["cwd"]).is_dir():
         raise ValueError("Working directory does not exist")
     if not interactive:
-        headless_options(spec["arguments"], spec["cwd"])
+        effective_cwd, _, _ = headless_options(spec["arguments"], spec["cwd"])
+        from launch import frontend_arguments
+
+        spec["arguments"] = frontend_arguments(spec["arguments"], spec["cwd"])
+        spec["cwd"] = effective_cwd
+        if not Path(effective_cwd).is_dir():
+            raise ValueError("Working directory does not exist")
     atomic_json(root / (ident + ".job.json"), spec)
     process = spawn(
         [
@@ -140,31 +148,50 @@ async def attach(
     state, prefix, binary, arguments=None, wait_forever=False, takeover=False, cwd=None
 ):
     from router import RouterError, clean_env
+    from launch import translate, frontend_arguments
 
     ident = resolve(state, prefix)
     root = folder(state)
-    # Frontend and backend must keep the same native runtime when the global CLI
-    # is updated while this task remains alive.
-    spec = json.loads((root / (ident + ".job.json")).read_text())
+    spec_path = root / (ident + ".job.json")
+    spec = json.loads(spec_path.read_text())
     binary = spec.get("binary") or binary
     meta = root / (ident + ".connection.json")
-    deadline = time.monotonic() + 60
-    last_message = None
-    while not meta.exists() and (wait_forever or time.monotonic() < deadline):
-        spec = json.loads((root / (ident + ".job.json")).read_text())
-        if spec.get("state") in {"stopped", "needs_attention"}:
-            raise RouterError(
-                "Session stopped or needs attention. Check events and doctor."
-            )
-        if wait_forever:
-            pool = Pool(state)
+    invocation_cwd = cwd
+    reconnect = False
+
+    async def connection(previous=None):
+        deadline = time.monotonic() + 60
+        last_message = None
+        while wait_forever or time.monotonic() < deadline:
+            job = json.loads(spec_path.read_text())
+            if job.get("state") in {"stopped", "needs_attention", "removed"}:
+                raise RouterError(
+                    "Session stopped or needs attention. Check status and events."
+                )
             try:
-                detail = next((s for s in pool.detail() if s["id"] == ident), {})
-            finally:
-                pool.close()
-            message = (detail.get("state"), detail.get("next_wake"))
-            if message != last_message:
-                if message[1]:
+                candidate = json.loads(meta.read_text())
+                if (
+                    Pool.alive(candidate["pid"])
+                    and candidate.get("birth") == process_birth(candidate["pid"])
+                    and (
+                        not previous
+                        or any(
+                            candidate.get(k) != previous.get(k)
+                            for k in ("pid", "birth", "token")
+                        )
+                    )
+                ):
+                    return candidate
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            if wait_forever:
+                pool = Pool(state)
+                try:
+                    detail = next((s for s in pool.detail() if s["id"] == ident), {})
+                finally:
+                    pool.close()
+                message = (detail.get("state"), detail.get("next_wake"))
+                if message != last_message and message[1]:
                     print(
                         "Waiting until "
                         + time.strftime("%m-%d %H:%M:%S", time.localtime(message[1]))
@@ -172,114 +199,116 @@ async def attach(
                         flush=True,
                     )
                 last_message = message
-        await asyncio.sleep(0.5)
-    if not meta.exists():
+            await asyncio.sleep(0.5)
         raise RouterError(
-            "Session is still waiting for an account. Check status; attach when it is ready."
+            "Session is still recovering or waiting for an account. Check status and attach when ready."
         )
-    value = json.loads(meta.read_text())
-    if not Pool.alive(value["pid"]) or value.get("birth") != process_birth(
-        value["pid"]
-    ):
-        raise RouterError(
-            "This session connection is stale. The supervisor is recovering it; check status."
-        )
-    env = clean_env(Path(value["home"]))
-    env["RELAY_TRANSPORT_TOKEN"] = value["token"]
-    # Permission settings belong to the server's persisted task. They are not
-    # passed as unsupported resume overrides to the native remote frontend.
-    args = arguments or ["resume", value["thread"]]
-    if not arguments and not value.get("thread"):
-        args = []
-    from launch import translate, frontend_arguments
 
-    invocation_cwd = cwd or value.get("cwd") or os.getcwd()
-    args = frontend_arguments(args, invocation_cwd)
-    args, overrides = translate(args)
-    if overrides:
-        await send_control(state, ident, "permissions", overrides)
-    if takeover:
-        await send_control(state, ident, "detach")
-        value = json.loads(meta.read_text())
+    value = await connection()
+    while True:
+        env = clean_env(Path(value["home"]))
         env["RELAY_TRANSPORT_TOKEN"] = value["token"]
-    proc = await asyncio.create_subprocess_exec(
-        binary,
-        "--remote",
-        value["url"],
-        "--remote-auth-token-env",
-        "RELAY_TRANSPORT_TOKEN",
-        *args,
-        env=env,
-        cwd=invocation_cwd,
-    )
-    waiter = asyncio.create_task(proc.wait())
-    try:
-        while proc.returncode is None:
-            try:
-                return await asyncio.wait_for(asyncio.shield(waiter), 1)
-            except asyncio.TimeoutError:
-                pass
-            try:
-                latest = json.loads(meta.read_text())
-                if (
-                    latest.get("pid") == value["pid"]
-                    and latest.get("token") != value["token"]
-                ):
-                    # A takeover moved the attachment. Prevent the old native
-                    # frontend from reconnecting forever with its expired token.
-                    return 0
-            except FileNotFoundError:
-                if (
-                    json.loads((root / (ident + ".job.json")).read_text()).get("state")
-                    == "stopped"
-                ):
-                    return 0
-        return proc.returncode
-    finally:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(asyncio.shield(waiter), 5)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-        await asyncio.gather(waiter, return_exceptions=True)
+        if reconnect:
+            args = ["resume", value["thread"]] if value.get("thread") else []
+            if "--no-alt-screen" in (arguments or []):
+                args.append("--no-alt-screen")
+            invocation_cwd = value.get("cwd") or invocation_cwd
+        else:
+            args = (
+                arguments
+                if arguments is not None
+                else (["resume", value["thread"]] if value.get("thread") else [])
+            )
+        invocation_cwd = invocation_cwd or value.get("cwd") or os.getcwd()
+        args, overrides = translate(frontend_arguments(args, invocation_cwd))
+        if overrides:
+            await send_control(state, ident, "permissions", overrides)
+        if takeover and not reconnect:
+            await send_control(state, ident, "detach")
+            value = json.loads(meta.read_text())
+            env["RELAY_TRANSPORT_TOKEN"] = value["token"]
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            "--remote",
+            value["url"],
+            "--remote-auth-token-env",
+            "RELAY_TRANSPORT_TOKEN",
+            *args,
+            env=env,
+            cwd=invocation_cwd,
+        )
+        waiter = asyncio.create_task(proc.wait())
+        replacement = False
+        missing = False
+        try:
+            while True:
+                try:
+                    latest = json.loads(meta.read_text())
+                    if latest.get("pid") != value["pid"] or latest.get(
+                        "birth"
+                    ) != value.get("birth"):
+                        replacement = True
+                        break
+                    if latest.get("token") != value["token"]:
+                        # Explicit takeover closes the old terminal, not the task.
+                        return 0
+                except (FileNotFoundError, json.JSONDecodeError):
+                    missing = True
+                    if json.loads(spec_path.read_text()).get("state") in {
+                        "stopped",
+                        "needs_attention",
+                    }:
+                        return 0
+                try:
+                    result = await asyncio.wait_for(asyncio.shield(waiter), 0.5)
+                    if missing:
+                        replacement = True
+                        break
+                    return result
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(asyncio.shield(waiter), 5)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            await asyncio.gather(waiter, return_exceptions=True)
+        if replacement:
+            print("Reconnecting to the recovered task…", flush=True)
+            value = await connection(previous=value)
+            reconnect = True
 
 
 def headless_options(args, cwd):
-    """Common background launch options. Interactive run still uses native parsing."""
-    from launch import translate
+    """Use the same native option boundaries for background and interactive work."""
+    from launch import translate, tokens, working_directory, backend_arguments
 
     frontend, thread = translate(args)
-    backend = []
-    i = 0
-    while i < len(frontend):
-        arg = frontend[i]
-        if arg in ("-p", "--profile") or arg.startswith("--profile="):
-            raise ValueError(
-                "Native profiles need an interactive launch: relay run -- -p PROFILE"
-            )
-        if arg in ("-m", "--model", "-C", "--cd", "-c", "--config"):
-            if i + 1 == len(frontend):
-                raise ValueError(arg + " requires a value")
-            value = frontend[i + 1]
-            i += 2
-            if arg in ("-m", "--model"):
-                thread["model"] = value
-            elif arg in ("-C", "--cd"):
-                cwd = str(Path(value).resolve())
-            else:
-                backend.extend([arg, value])
-        elif arg == "--search":
-            backend.extend(["-c", 'web_search="live"'])
-            i += 1
-        else:
+    cwd = working_directory(frontend, cwd)
+    supported = {
+        "--model",
+        "--cd",
+        "--config",
+        "--profile",
+        "--enable",
+        "--disable",
+        "--search",
+        "--strict-config",
+        "--add-dir",
+    }
+    for name, value, raw in tokens(frontend):
+        if name not in supported:
             raise ValueError(
                 "Background start does not accept "
-                + arg
-                + "; use --resume/--prompt or attach for interactive CLI options"
+                + raw[0]
+                + "; use --resume/--prompt or relay run -- for native CLI commands"
             )
-    return cwd, thread, backend
+        if name == "--model":
+            thread["model"] = value
+    return cwd, thread, backend_arguments(args)
 
 
 async def serve(state, ident, binary):
@@ -289,10 +318,15 @@ async def serve(state, ident, binary):
     async with file_lock(state / "metadata.lock", shared=True):
         try:
             return await _serve(state, ident, binary)
-        except RouterError as error:
+        except (RouterError, ValueError, OSError) as error:
             job = folder(state) / (ident + ".job.json")
             spec = json.loads(job.read_text())
-            spec.update(state="needs_attention", last_error=str(error))
+            spec.update(
+                state="needs_attention",
+                last_error=str(error)
+                if isinstance(error, RouterError)
+                else "Launch settings or project files are unavailable. Check relay explain and relay doctor.",
+            )
             atomic_json(job, spec)
             return 2
 
@@ -366,7 +400,7 @@ async def _serve(state, ident, binary):
 
         frontend, overrides = translate(spec.get("arguments", []))
         cwd = spec["cwd"]
-        backend_args = backend_arguments(frontend)
+        backend_args = backend_arguments(spec.get("arguments", []))
     else:
         cwd, overrides, backend_args = headless_options(
             spec.get("arguments", []), spec["cwd"]
@@ -396,6 +430,14 @@ async def _serve(state, ident, binary):
     controller.background = True
     controller.starting = True
     controller.launch_overrides = overrides
+    from launch import profile_config
+
+    private_config = profile_config(spec.get("arguments", []))
+    if private_config:
+        controller.launch_overrides["config"] = private_config
+    from launch import additional_roots
+
+    controller.additional_roots = additional_roots(spec.get("arguments", []), cwd)
     controller.project = cwd
     controller.profile = spec.get("profile")
 
@@ -423,6 +465,16 @@ async def _serve(state, ident, binary):
     connection = root / (ident + ".connection.json")
     try:
         init_result = await backend.initialize()
+        if controller.additional_roots:
+            effective = await backend.call(
+                "config/read", {"cwd": cwd, "includeLayers": False}
+            )
+            configured = (
+                effective.get("config", {}).get("sandbox_workspace_write") or {}
+            ).get("writable_roots", [])
+            controller.additional_roots = list(
+                dict.fromkeys([*configured, *controller.additional_roots])
+            )
         # Restore configuration-only recovery intent from a previous worker.
         with pool.db() as db:
             old = db.execute(
@@ -472,15 +524,7 @@ async def _serve(state, ident, binary):
                     {
                         k: v
                         for k, v in controller.thread_settings[thread_id].items()
-                        if k
-                        in {
-                            "model",
-                            "cwd",
-                            "approvalPolicy",
-                            "sandbox",
-                            "permissions",
-                            "serviceTier",
-                        }
+                        if k in RESUME_FIELDS
                     }
                 )
             result = await backend.call("thread/resume", params)
@@ -537,10 +581,24 @@ async def _serve(state, ident, binary):
                 nonlocal thread_id
                 thread_id = ident
                 meta["thread"] = ident
+                effective_cwd = values.get("cwd")
+                if effective_cwd:
+                    meta["cwd"] = effective_cwd
+                    controller.project = effective_cwd
+                    controller.preferences = settings.load(
+                        state, effective_cwd, controller.profile
+                    )
+                    controller.retry_interval = controller.preferences["retry_interval"]
+                    controller.retry_attempts = controller.preferences["retry_attempts"]
+                    controller.interval = controller.preferences[
+                        "unknown_reset_interval"
+                    ]
                 atomic_json(connection, meta)
                 # Preserve the accepted conversation identity across worker restart.
                 latest = json.loads(spec_path.read_text())
                 latest["resume"] = ident
+                if effective_cwd:
+                    latest["cwd"] = effective_cwd
                 latest["state"] = "running"
                 spec.update(latest)
                 atomic_json(spec_path, spec)
@@ -592,8 +650,12 @@ async def _serve(state, ident, binary):
                         kind=None,
                         episode=None,
                     )
-                elif persisted.get("active_items") or not persisted.get("accepted"):
-                    controller.paused_uncertain.add(thread_id)
+                elif (
+                    persisted.get("review_required")
+                    or persisted.get("active_items")
+                    or not persisted.get("accepted")
+                ):
+                    controller.hold_for_review(thread_id)
                     controller.note(
                         "needs_attention",
                         reason="worker_restarted_during_uncertain_action",
@@ -640,30 +702,36 @@ async def _serve(state, ident, binary):
             *[t for t in (controller.recovery, controller.restart_task) if t],
             return_exceptions=True,
         )
+        if controller.awake_process and controller.awake_process.returncode is None:
+            controller.awake_process.terminate()
+            await controller.awake_process.wait()
         await controller.backend.close()
         pool.close()
         connection.unlink(missing_ok=True)
 
 
-async def send_control(state, ident, op, params=None):
+async def wait_control(pool, command, timeout=15):
     from router import RouterError
 
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with pool.db() as db:
+            row = db.execute(
+                "SELECT status FROM commands WHERE id=?", (command,)
+            ).fetchone()
+        if row and row[0] == "done":
+            return
+        if row and row[0] == "failed":
+            raise RouterError(
+                "Session rejected that action. Check status and events; no change was assumed."
+            )
+        await asyncio.sleep(0.1)
+    raise RouterError("Session control timed out; check status before retrying.")
+
+
+async def send_control(state, ident, op, params=None):
     pool = Pool(state)
     try:
-        command = pool.command(ident, op, params)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            with pool.db() as db:
-                row = db.execute(
-                    "SELECT status FROM commands WHERE id=?", (command,)
-                ).fetchone()
-            if row and row[0] == "done":
-                return
-            if row and row[0] == "failed":
-                raise RouterError(
-                    "Session is busy or rejected that control; no permission change was assumed"
-                )
-            await asyncio.sleep(0.1)
-        raise RouterError("Session control timed out; check status before retrying")
+        await wait_control(pool, pool.command(ident, op, params), timeout=15)
     finally:
         pool.close()

@@ -23,6 +23,7 @@ DEFAULTS = {
     "offline_retry": 30,
     "background_on_disconnect": False,
     "broker_idle_seconds": 600,
+    "keep_awake": False,
 }
 
 

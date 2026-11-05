@@ -56,19 +56,16 @@ class ArgumentTests(unittest.TestCase):
 
     def test_native_modes_keep_command_and_option_values_distinct(self):
         for argv in (
-            ["exec", "--json", "hello"],
-            ["-m", "custom", "review", "--uncommitted"],
             ["resume", "--oss"],
-            ["resume", "-p", "work"],
-            ["resume", "--add-dir", "/tmp"],
             ["resume", "--help"],
             ["--remote=ws://localhost:1", "resume"],
-            ["--worktree"],
         ):
             with self.subTest(argv=argv):
                 self.assertTrue(native_mode(argv))
         for argv in (
             ["resume", "--last"],
+            ["exec", "--json", "hello"],
+            ["-m", "custom", "review", "--uncommitted"],
             ["-c", "exec", "resume"],
             ["fork", "--", "--oss"],
             ["a prompt", "exec"],
@@ -140,11 +137,14 @@ class LaunchFlowTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_native_utilities_need_no_account_pool_or_protocol_adaptation(self):
-        argv = ["--", "exec", "--json", "--", "literal prompt"]
+        argv = ["--", "mcp", "list", "--", "literal value"]
         args = argparse.Namespace(command="run", codex_args=argv)
         process = type("Process", (), {"wait": AsyncMock(return_value=7)})()
-        with patch(
-            "asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)
-        ) as spawn:
+        with (
+            patch("launch.native_commands", return_value={"mcp"}),
+            patch(
+                "asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)
+            ) as spawn,
+        ):
             self.assertEqual(await dispatch(args, Path("/unused"), "/codex"), 7)
         self.assertEqual(spawn.call_args.args, ("/codex", *argv[1:]))

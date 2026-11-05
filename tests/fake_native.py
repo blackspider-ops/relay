@@ -177,7 +177,7 @@ for raw in sys.stdin:
             }
         elif method == "thread/loaded/list":
             result = {"data": change(lambda d: list(d["threads"]))}
-        elif method == "turn/start":
+        elif method in {"turn/start", "review/start"}:
             thread = params["threadId"]
             turn = str(uuid.uuid4())
             value = {"id": turn, "status": "inProgress", "items": [], "error": None}
@@ -189,7 +189,9 @@ for raw in sys.stdin:
                     "activeFlags": [],
                 }
                 data["threads"][thread]["runtime"] = os.getpid()
-                return sum(c["method"] == "turn/start" for c in data["calls"])
+                return sum(
+                    c["method"] in {"turn/start", "review/start"} for c in data["calls"]
+                )
 
             count = change(begin)
             fault = (

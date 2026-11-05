@@ -35,9 +35,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_config_forwarded_without_native_only_profile_flag(self):
         self.assertEqual(
-            backend_arguments(
-                ["resume", "-p", "work", "-c", 'model_reasoning_effort="high"']
-            ),
+            backend_arguments(["resume", "-c", 'model_reasoning_effort="high"']),
             ["-c", 'model_reasoning_effort="high"'],
         )
 

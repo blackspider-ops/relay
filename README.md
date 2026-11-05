@@ -39,6 +39,7 @@ relay run -- resume --yolo
 relay run -- -C ~/projects/website resume
 relay run -- exec --json "Review this project"
 relay status --watch
+relay menubar
 ```
 
 `--yolo` keeps its usual full-access meaning. Without it, Relay keeps the task's
@@ -46,12 +47,12 @@ permissions. Resume starts with sessions from your current folder, just like
 `codex resume`. Add `--all` to browse every folder, or `-C PATH` to choose a folder.
 Different terminals can work on different conversations at once.
 
-Put native Codex commands and options after `relay run --`. Interactive sessions,
-`resume`, and `fork` use Relay recovery. Other commands run native Codex with your
-normal Codex login. Native-only launch settings (`-p/--profile`, `--add-dir`,
-`--worktree`, `--oss`, `--local-provider`, `--remote`, and
-`--dangerously-bypass-hook-trust`) also run directly without account recovery.
-Relay announces this in the terminal rather than ignoring those settings.
+Put native Codex commands and options after `relay run --`. Use `relay run --help`
+for the full Codex command and flag list, or `relay help` for Relay management.
+Profiles, extra writable directories, Git worktrees, and noninteractive tasks can
+use the account pool. `relay explain -- <arguments>` shows how a launch will run.
+Native utilities, external/local-provider endpoints, and a few native-only setup
+flags run directly; `--require-recovery` rejects a launch outside Relay recovery.
 
 If a conversation is already open in another app, close it there before resuming
 it here, or use Codex's `fork` command for a separate copy. To move a Relay task
@@ -60,6 +61,10 @@ between terminals:
 ```sh
 relay attach --takeover SESSION_ID
 ```
+
+Accounts show their saved email addresses. The watch view updates only when local
+status changes; it uses no model allowance. The menu bar uses an icon and opens
+at Mac login. `relay menubar --no-startup --configure-only` disables login startup.
 
 ## What happens when something stops?
 
@@ -80,9 +85,11 @@ relay attach SESSION_ID
 relay stop SESSION_ID
 ```
 
-Background tasks keep running after their terminal closes. They do not start
-automatically after a Mac reboot. Use `relay status --all` to find saved sessions
-and `relay restart SESSION_ID` to recover a stopped one.
+Background tasks keep running after their terminal closes. Use `relay status --all`
+to find saved sessions and `relay restart SESSION_ID` to recover a stopped one.
+Opt into task recovery at Mac login with `relay startup enable SESSION_ID`.
+`relay workspace save daily` and `relay workspace restore daily` retain the same
+conversations across several terminals.
 
 ## A few useful commands
 

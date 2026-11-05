@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import sys
 
-ADAPTER = 4
+ADAPTER = 5
 
 
 def executable(path):
@@ -130,6 +130,8 @@ def validate_schema(root):
                     "threadId": ident,
                     "sandbox": "danger-full-access",
                     "approvalPolicy": "never",
+                    "approvalsReviewer": "user",
+                    "runtimeWorkspaceRoots": ["/tmp/relay-probe"],
                 },
             },
             {

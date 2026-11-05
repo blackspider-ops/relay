@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import contextvars
 import hashlib
 import json
 import os
@@ -20,10 +21,10 @@ import time
 import uuid
 
 from pool import Pool, blocked, reset_time, failure_kind, file_lock
-from launch import translate
+from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -42,6 +43,16 @@ CONTINUE = (
 
 class RouterError(Exception):
     """A message safe to display; never include a server error or credential."""
+
+
+class RecoveryTransition(Exception):
+    """Return to the recovery driver without growing the Python call stack."""
+
+    def __init__(self, kind):
+        self.kind = kind
+
+
+_recovery_active = contextvars.ContextVar("relay_recovery_active", default=None)
 
 
 class RemoteError(RouterError):
@@ -95,7 +106,7 @@ def labels(state: Path) -> list[str]:
     )
 
 
-def read_keychain(home: Path) -> dict:
+def read_keychain(home: Path, *, include_identity=False) -> dict:
     """Native Codex direct-keyring layout in 0.166.0. stdout remains in memory."""
     key = "cli|" + hashlib.sha256(str(home.resolve()).encode()).hexdigest()[:16]
     try:
@@ -134,11 +145,16 @@ def read_keychain(home: Path) -> dict:
             raise RouterError(
                 "Account token expired; enroll this account again if automatic refresh fails."
             )
-        return {
+        result = {
             "accessToken": token,
             "chatgptAccountId": account_id,
             "chatgptPlanType": metadata.get("chatgpt_plan_type"),
         }
+        if include_identity:
+            result["email"] = claims.get("email") or claims.get(
+                "https://api.openai.com/profile", {}
+            ).get("email")
+        return result
     except (KeyError, ValueError, TypeError, IndexError):
         raise RouterError(
             "This Keychain entry is not a usable ChatGPT login."
@@ -391,6 +407,7 @@ class Controller:
         self.thread_settings = {}
         self.status_changed = asyncio.Event()
         self.launch_overrides = {}
+        self.additional_roots = []
         self.preferences = (
             settings.load(pool.state) if pool else settings.DEFAULTS.copy()
         )
@@ -415,6 +432,7 @@ class Controller:
         self.project = os.getcwd()
         self.profile = None
         self.network_state = None
+        self.awake_process = None
         self.fallback_tried = {}
 
     def attached(self):
@@ -456,6 +474,12 @@ class Controller:
             "environments",
             "disabledPluginIds",
             "runtimeWorkspaceRoots",
+            "modelProvider",
+            "personality",
+            "baseInstructions",
+            "developerInstructions",
+            "outputSchema",
+            "cyberAccessProgram",
         }
         current = self.thread_settings.setdefault(thread, {})
         params = dict(params)
@@ -481,6 +505,25 @@ class Controller:
             current.pop("sandboxPolicy", None)
         if params.get("sandbox") or params.get("sandboxPolicy"):
             current.pop("permissions", None)
+
+    def hold_for_review(self, thread, reason="uncertain_action"):
+        self.paused_uncertain.add(thread)
+        self.persist(
+            thread, review_required=True, review_reason=reason, state="needs_attention"
+        )
+
+    def clear_review(self, thread):
+        self.paused_uncertain.discard(thread)
+        self.persist(thread, review_required=False, review_reason=None)
+
+    def can_continue(self, thread, generation):
+        saved = self.pool.intent(thread) if self.pool else {}
+        return (
+            generation == self.user_generation
+            and self.attached()
+            and thread not in self.paused_uncertain
+            and not (saved or {}).get("review_required", False)
+        )
 
     async def latest(self, thread):
         result = await self.backend.call(
@@ -529,12 +572,12 @@ class Controller:
                 return
             outcome, turn = await self.reconcile(thread, baseline)
             if outcome in {"running", "completed"}:
-                self.paused_uncertain.discard(thread)
+                self.clear_review(thread)
                 if outcome == "completed":
                     self.note("completed", thread=thread)
                 return
             if outcome == "failed":
-                self.paused_uncertain.discard(thread)
+                self.clear_review(thread)
                 code = (turn.get("error") or {}).get("codexErrorInfo")
                 kind = failure_kind(code, (turn.get("error") or {}).get("message"))
                 if kind:
@@ -552,7 +595,7 @@ class Controller:
                 return
             if attempt < self.retry_attempts:
                 await self.wait_until(self.clock() + self.retry_interval, generation)
-        self.paused_uncertain.add(thread)
+        self.hold_for_review(thread)
         self.note("needs_attention", thread=thread, reason="acceptance_unknown")
         self.report(
             "Could not prove the request was accepted. It was not replayed. Use retry after reviewing the saved thread."
@@ -627,6 +670,23 @@ class Controller:
                     except Exception:
                         self.pool.ack(command, "failed")
                         self.note("control_failed", operation=op)
+            if self.preferences.get("keep_awake") and self.active_threads:
+                if (
+                    self.awake_process is None
+                    or self.awake_process.returncode is not None
+                ):
+                    self.awake_process = await asyncio.create_subprocess_exec(
+                        "/usr/bin/caffeinate",
+                        "-i",
+                        "-w",
+                        str(os.getpid()),
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+            elif self.awake_process and self.awake_process.returncode is None:
+                self.awake_process.terminate()
+                await self.awake_process.wait()
+                self.awake_process = None
             if (
                 self.network_state is False
                 and now - last_network >= self.preferences["offline_retry"]
@@ -690,7 +750,11 @@ class Controller:
             if thread:
                 await self.backend.call("thread/resume", {"threadId": thread, **params})
                 self.merge_settings(thread, params)
-                self.launch_overrides = dict(params)
+            self.launch_overrides = {**self.launch_overrides, **params}
+            if params.get("permissions"):
+                self.launch_overrides.pop("sandbox", None)
+            elif params.get("sandbox"):
+                self.launch_overrides.pop("permissions", None)
         elif op == "switch":
             label = params.get("account")
             index = next(
@@ -739,7 +803,7 @@ class Controller:
                 )
                 self.pool.invalidate(self.account.label)
             if thread and (not self.recovery or self.recovery.done()):
-                self.paused_uncertain.discard(thread)
+                self.clear_review(thread)
                 self.recovery = asyncio.create_task(
                     self.continue_thread(thread, self.user_generation)
                 )
@@ -782,28 +846,21 @@ class Controller:
                     {
                         k: v
                         for k, v in self.thread_settings.get(thread, {}).items()
-                        if k
-                        in {
-                            "model",
-                            "cwd",
-                            "approvalPolicy",
-                            "approvalsReviewer",
-                            "sandbox",
-                            "permissions",
-                            "serviceTier",
-                        }
+                        if k in RESUME_FIELDS
                     }
                 )
+                if self.launch_overrides.get("config"):
+                    params["config"] = self.launch_overrides["config"]
                 try:
                     await self.backend.call("thread/resume", params)
                 except (RouterError, asyncio.TimeoutError):
-                    self.paused_uncertain.add(thread)
+                    self.hold_for_review(thread)
                     self.note(
                         "needs_attention", thread=thread, reason="backend_resume_failed"
                     )
                     continue
                 if in_flight:
-                    self.paused_uncertain.add(thread)
+                    self.hold_for_review(thread)
                     self.note(
                         "needs_attention",
                         thread=thread,
@@ -1081,12 +1138,19 @@ class Controller:
         return generation == self.user_generation and self.attached()
 
     async def continue_thread(self, thread, generation):
-        if not await self.wait_idle(generation):
+        if not self.can_continue(thread, generation):
+            return
+        if not await self.wait_idle(generation) or not self.can_continue(
+            thread, generation
+        ):
             return
         params = {
             "threadId": thread,
             "input": [{"type": "text", "text": CONTINUE, "text_elements": []}],
         }
+        for key in ("outputSchema", "cyberAccessProgram", "effort", "summary"):
+            if self.thread_settings.get(thread, {}).get(key) is not None:
+                params[key] = self.thread_settings[thread][key]
         params["clientUserMessageId"] = str(uuid.uuid4())
         baseline = self.turn_ids.get(thread) or "__unknown_before_submission__"
         self.pending_intents[thread] = {"baseline": baseline, "accepted": False}
@@ -1114,6 +1178,11 @@ class Controller:
     async def restore_recovery(self, thread, persisted):
         """Honor an accepted retry's original deadline after a process restart."""
         generation = self.user_generation
+        if persisted.get("review_required"):
+            self.hold_for_review(
+                thread, persisted.get("review_reason") or "review_required"
+            )
+            return
         episode = persisted.get("episode")
         if episode:
             episode = dict(episode)
@@ -1130,7 +1199,7 @@ class Controller:
                 deadline, generation, allow_early=persisted.get("kind") == "quota"
             )
         if persisted.get("active_items") or not persisted.get("accepted", False):
-            self.paused_uncertain.add(thread)
+            self.hold_for_review(thread)
             self.note(
                 "needs_attention",
                 thread=thread,
@@ -1235,6 +1304,20 @@ class Controller:
         return None, min(deadlines, default=self.clock() + self.interval)
 
     async def recover(self, thread, generation, kind="quota"):
+        if _recovery_active.get() is asyncio.current_task():
+            raise RecoveryTransition(kind)
+        token = _recovery_active.set(asyncio.current_task())
+        try:
+            while self.can_continue(thread, generation):
+                try:
+                    return await self._recover_episode(thread, generation, kind)
+                except RecoveryTransition as transition:
+                    kind = transition.kind
+                    await asyncio.sleep(0)
+        finally:
+            _recovery_active.reset(token)
+
+    async def _recover_episode(self, thread, generation, kind):
         try:
             model = self.model_for(thread)
             if kind == "model":
@@ -1374,9 +1457,10 @@ class Controller:
                     state="waiting_for_reset",
                 )
                 await self.wait_until(max(self.clock() + 1, deadline), generation)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, RecoveryTransition):
             raise
         except Exception:
+            self.hold_for_review(thread, "handoff_failed")
             self.note("needs_attention", thread=thread, reason="handoff_failed")
             self.report(
                 "Automatic handoff stopped. Your saved thread is retained; continue manually."
@@ -1391,6 +1475,23 @@ class Controller:
         ):
             message = dict(message)
             message["params"] = {**message.get("params", {}), **self.launch_overrides}
+        if (
+            method in {"thread/start", "thread/resume", "thread/fork"}
+            and self.additional_roots
+        ):
+            message = {**message, "params": dict(message.get("params", {}))}
+            params = message["params"]
+            params["runtimeWorkspaceRoots"] = list(
+                dict.fromkeys(
+                    [
+                        *(
+                            params.get("runtimeWorkspaceRoots")
+                            or [params.get("cwd") or self.project]
+                        ),
+                        *self.additional_roots,
+                    ]
+                )
+            )
         if not method:
             # Approval responses keep the server's original ID, never our call IDs.
             if request_id in self.server_requests:
@@ -1442,6 +1543,7 @@ class Controller:
                 self.fallback_tried.pop(message["params"]["threadId"], None)
             self.status_changed.set()
             if method == "turn/start":
+                self.clear_review(message["params"]["threadId"])
                 self.last_turn[message["params"]["threadId"]] = message["params"]
                 self.merge_settings(message["params"]["threadId"], message["params"])
         try:
@@ -1635,17 +1737,19 @@ class Controller:
 async def run_pool(args, state, binary):
     import service
 
-    from launch import frontend_arguments, working_directory
+    from launch import frontend_arguments, working_directory, prepare_worktree
 
     invocation_cwd = os.getcwd()
     cwd = working_directory(args.codex_args, invocation_cwd)
     settings.load(state, cwd, args.profile)
     arguments = frontend_arguments(args.codex_args, invocation_cwd)
+    arguments, cwd = prepare_worktree(arguments, state, cwd)
     frontend, overrides = translate(arguments)
-    target = resume_target(
+    target = await resolve_resume_target(
         frontend,
         Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")),
         cwd,
+        binary,
     )
     pool = Pool(state)
     try:
@@ -1692,45 +1796,77 @@ async def run_pool(args, state, binary):
                 await asyncio.sleep(0.1)
 
 
-def resume_target(arguments, home, cwd):
+def resume_selection(arguments):
     from launch import tokens
 
     parsed = list(tokens(arguments))
     positionals = [
         value for name, value, raw in parsed if name is None and len(raw) == 1
     ]
-    if not positionals or positionals[0] != "resume":
-        return None
-    if len(positionals) > 1:
-        try:
-            return str(uuid.UUID(positionals[1]))
-        except (ValueError, AttributeError):
-            return None
+    if not positionals or positionals[0] not in {"resume", "fork"}:
+        return None, set()
     flags = {name for name, _, _ in parsed}
-    if "--last" not in flags:
-        return None
-    database = home / "state_5.sqlite"
-    if not database.exists():
-        return None
-    import sqlite3
+    return positionals[1] if len(positionals) > 1 else None, flags
 
+
+def resume_target(arguments, home=None, cwd=None):
+    """Explicit IDs need no native database or backend."""
+    selected, _ = resume_selection(arguments)
     try:
-        db = sqlite3.connect("file:" + str(database) + "?mode=ro", uri=True)
-        try:
-            if "--all" in flags:
-                row = db.execute(
-                    "SELECT id FROM threads WHERE archived=0 ORDER BY updated_at DESC LIMIT 1"
-                ).fetchone()
-            else:
-                row = db.execute(
-                    "SELECT id FROM threads WHERE archived=0 AND cwd=? ORDER BY updated_at DESC LIMIT 1",
-                    (cwd,),
-                ).fetchone()
-        finally:
-            db.close()
-        return row[0] if row else None
-    except sqlite3.Error:
+        return str(uuid.UUID(selected)) if selected else None
+    except (ValueError, AttributeError):
         return None
+
+
+async def resolve_resume_target(arguments, home, cwd, binary=None, backend=None):
+    selected, flags = resume_selection(arguments)
+    explicit = resume_target(arguments)
+    if explicit or not selected and "--last" not in flags:
+        return explicit
+    own_backend = backend is None
+    if own_backend:
+        backend = await RPC.start(binary, home)
+        await backend.initialize()
+    try:
+        params = {
+            "archived": False,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "limit": 100,
+        }
+        if "--all" not in flags:
+            params["cwd"] = cwd
+        if "--include-non-interactive" in flags:
+            params["sourceKinds"] = [
+                "cli",
+                "vscode",
+                "exec",
+                "appServer",
+                "subAgent",
+                "subAgentReview",
+                "subAgentCompact",
+                "subAgentThreadSpawn",
+                "subAgentOther",
+                "unknown",
+            ]
+        if selected:
+            params["searchTerm"] = selected
+        while True:
+            response = await backend.call("thread/list", params)
+            for thread in response.get("data", []):
+                if not selected or selected in {
+                    thread.get("name"),
+                    thread.get("title"),
+                    thread.get("id"),
+                }:
+                    return thread["id"]
+            cursor = response.get("nextCursor")
+            if not cursor:
+                return None
+            params["cursor"] = cursor
+    finally:
+        if own_backend:
+            await backend.close()
 
 
 def add_account(args, state, binary):
@@ -1755,7 +1891,7 @@ def add_account(args, state, binary):
     # Once native login changes this home's credential, an old marker must no
     # longer make a failed/duplicate enrollment selectable.
     (home / "enrolled").unlink(missing_ok=True)
-    credentials = read_keychain(home)
+    credentials = read_keychain(home, include_identity=True)
     identity = hashlib.sha256(credentials["chatgptAccountId"].encode()).hexdigest()
     for label in labels(state):
         if label == args.label:
@@ -1768,6 +1904,13 @@ def add_account(args, state, binary):
     marker = home / "enrolled"
     marker.write_text(json.dumps({"identity": identity}) + "\n")
     marker.chmod(0o600)
+    if credentials.get("email"):
+        from settings import atomic_json
+
+        atomic_json(
+            home / "identity.json",
+            {"email": credentials["email"], "identity": identity},
+        )
     pool = Pool(state)
     if old_identity != identity:
         pool.reset_identity(args.label)
@@ -1799,10 +1942,14 @@ def transport_guard(token):
 
 def parser():
     p = argparse.ArgumentParser(
-        description="Keep Codex moving between your own accounts (macOS)."
+        prog="relay", description="Keep Codex moving between your own accounts (macOS)."
     )
     p.add_argument("--version", action="version", version="Relay " + VERSION)
     sub = p.add_subparsers(dest="command", required=True)
+    help_command = sub.add_parser(
+        "help", help="Show Relay help or help for one command"
+    )
+    help_command.add_argument("topic", nargs="*")
     add = sub.add_parser("add", help="Sign into one account using native Codex login")
     add.add_argument("label")
     add.add_argument("--device-auth", action="store_true")
@@ -1819,6 +1966,11 @@ def parser():
         "--profile", help="Recovery profile, separate from the native Codex profile"
     )
     run.add_argument("--name", help="Friendly session name")
+    run.add_argument(
+        "--require-recovery",
+        action="store_true",
+        help="Fail rather than run a native mode outside Relay recovery",
+    )
     run.add_argument(
         "codex_args",
         nargs=argparse.REMAINDER,
@@ -1842,13 +1994,27 @@ def parser():
     return p
 
 
+def parse_arguments(argv):
+    argv = list(argv)
+    if argv[:1] == ["attach"]:
+        boundary = argv.index("--") if "--" in argv else len(argv)
+        if "--takeover" in argv[1:boundary]:
+            argv.remove("--takeover")
+            argv.insert(1, "--takeover")
+    return parser().parse_args(argv)
+
+
 async def dispatch(args, state, binary):
     import commands
 
     if args.command == "run":
         from launch import arguments_only, native_mode
 
-        if native_mode(args.codex_args):
+        if native_mode(args.codex_args, binary):
+            if getattr(args, "require_recovery", False):
+                raise RouterError(
+                    "This mode runs in native Codex outside Relay recovery. Use relay explain -- to inspect the launch."
+                )
             if sys.stderr.isatty():
                 print(
                     "Running native Codex; automatic account recovery is inactive for this mode.",
@@ -1983,6 +2149,10 @@ async def dispatch(args, state, binary):
         return await commands.manage(args, state, binary)
     if args.first:
         args.first = commands.resolve_label(state, args.first)
+    import execution
+
+    if execution.command(args.codex_args):
+        return await execution.run(args, state, binary)
     return await run_pool(args, state, binary)
 
 
@@ -2016,6 +2186,11 @@ def selected_binary(args, state):
         "restart",
         "menubar",
         "_supervise",
+        "diagnostics",
+        "clean",
+        "workspace",
+        "explain",
+        "startup",
     }:
         return None
     if args.command == "group" and args.action != "start":
@@ -2045,7 +2220,33 @@ def selected_binary(args, state):
 
 def main():
     os.umask(0o077)
-    args = parser().parse_args()
+    argv = sys.argv[1:]
+    if argv[:2] == ["help", "run"]:
+        argv = ["run", "--help"]
+    before_separator = argv[: argv.index("--")] if "--" in argv else argv
+    if argv[:1] == ["run"] and any(
+        flag in before_separator for flag in ("--help", "-h")
+    ):
+        result = subprocess.call([codex_path(), "--help"])
+        print(
+            "\nRelay launch options (before --):\n"
+            "  --first ACCOUNT       Start with an enrolled account\n"
+            "  --profile NAME        Select a Relay recovery profile\n"
+            "  --name NAME           Name this Relay session\n"
+            "  --require-recovery    Refuse modes outside account recovery\n\n"
+            "Examples:\n  relay run -- resume --yolo\n"
+            "  relay run -- -m MODEL -C PATH\n"
+            '  relay run -- exec --json "Run the checks"\n\n'
+            "Native Codex flags go after --. For native command help:\n"
+            "  relay run -- exec --help\n  relay help codex resume"
+        )
+        return result
+    if not argv or argv[:1] == ["help"]:
+        topic = argv[1:] if argv else []
+        if topic[:1] == ["codex"]:
+            return subprocess.call([codex_path(), *topic[1:], "--help"])
+        return parser().parse_args([*topic, "--help"])
+    args = parse_arguments(argv)
     if args.command in {"run", "attach"}:
 
         def interrupted(signum, frame):
@@ -2061,7 +2262,15 @@ def main():
     private_dir(state / "accounts")
     binary = selected_binary(args, state)
     if args.command == "list":
-        print("\n".join(labels(state)) or "No accounts enrolled.")
+        import commands
+
+        value = commands.snapshot(state)
+        print(
+            "\n".join(
+                f"{a['id']}: {a.get('email') or a['name']}" for a in value["accounts"]
+            )
+            or "No accounts enrolled."
+        )
         return 0
     return asyncio.run(dispatch(args, state, binary))
 

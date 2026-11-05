@@ -433,6 +433,13 @@ class Pool:
                 (self.clock() - settings.load(self.state)["history_days"] * 86400,),
             )
 
+    def checked_at(self, label):
+        with self.db() as db:
+            row = db.execute(
+                "SELECT checked FROM usage WHERE label=?", (label,)
+            ).fetchone()
+        return row[0] if row else None
+
     def cached(self, label, max_age=60, not_before=None):
         with self.db() as db:
             row = db.execute(

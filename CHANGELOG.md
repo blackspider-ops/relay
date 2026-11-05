@@ -1,5 +1,19 @@
 # Changes
 
+## 0.5.0
+
+- Show saved account emails in the dashboard and menu bar.
+- Update watched status only when local data changes.
+- Add a native menu icon, session actions, and persistent Mac login startup.
+- Enforce review holds, preserve launch permissions and settings, and reconnect replacement workers.
+- Keep effective project folders synchronized across resume and restart.
+- Replace recursive recovery with an iterative driver.
+- Support managed native profiles, extra workspace roots, Git worktrees, and noninteractive tasks.
+- Resolve saved sessions with native filters and names.
+- Add full help, launch previews, confirmed controls, saved workspaces, diagnostics, and safe cleanup previews.
+- Add optional background login recovery and keep-awake while tasks are active.
+- Add a GitHub trusted-publishing workflow.
+
 ## 0.4.2
 
 - Default the resume picker to the current project; honor explicit working directories.

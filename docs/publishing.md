@@ -8,28 +8,36 @@ Friends can run `npx relay-codex` or install it with `npm install -g relay-codex
 The GitHub repository is enough for friends to install or try Relay:
 
 ```sh
-npm install -g github:blackspider-ops/relay#v0.4.2
-npx --yes github:blackspider-ops/relay#v0.4.2 --version
+npm install -g github:blackspider-ops/relay#v0.5.0
+npx --yes github:blackspider-ops/relay#v0.5.0 --version
 ```
 
-`npx` runs packages. It is not a separate publishing service. Publishing the
-`relay-codex` package on npm would also make `npx relay-codex` available.
+`npx` runs packages; it is not a separate publishing service. Publishing
+`relay-codex` on npm also makes `npx relay-codex` available.
 
 ## Publish on npm
 
-Only a maintainer needs to do this:
+The repository includes `.github/workflows/publish.yml`. Configure a trusted
+publisher for `relay-codex` using GitHub user `blackspider-ops`, repository `relay`,
+and workflow filename `publish.yml`. Select direct `npm publish` permission if
+releases should publish automatically. No long-lived publishing token is needed.
+A new trusted publisher must complete its first publish within npm's validation
+window. Run the workflow for an existing reviewed version tag, or publish the
+GitHub release; the workflow runs checks before publishing.
+
+Initial trust setup requires npm account verification. Interactive local
+`npm publish` also requires verification when package 2FA applies. Installing and
+running the public package does not require npm sign-in. An expired publishing
+prompt should be restarted once, rather than repeatedly running `npm login`.
+
+For a manual release, review and publish the exact packed artifact:
 
 ```sh
-npm login
 npm test
 npm run check
-npm pack --dry-run
-npm publish --access public
+npm pack --ignore-scripts
+npm publish ./relay-codex-VERSION.tgz --access public
 ```
-
-Use an npm account with publishing access and two-factor authentication, or the
-supported trusted-publishing setup. Package-name availability is checked again at
-publication; the GitHub repository does not reserve the npm name.
 
 After publishing, friends can use:
 
@@ -54,6 +62,8 @@ For a new release, update the package and Python versions together, run the chec
 tag it, upload the archive, then update the formula URL and checksum. Keep the
 previous release available for users who need to roll back.
 
-Official references: [npm publishing](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages),
+Official references: [trusted publishing](https://docs.npmjs.com/trusted-publishers/),
+[package publishing verification](https://docs.npmjs.com/requiring-2fa-for-package-publishing-and-settings-modification/),
+[npm publishing](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages),
 [npx](https://docs.npmjs.com/cli/v11/commands/npx/), and
 [Homebrew taps](https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap).

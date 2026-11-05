@@ -13,6 +13,41 @@ from pool import Pool, file_lock
 import settings
 
 
+def account_identity(state, label):
+    from router import account_home
+
+    home = account_home(state, label)
+    for name in ("identity.json", "enrolled"):
+        path = home / name
+        try:
+            value = json.loads(path.read_text())
+            if value.get("email"):
+                return {"email": value["email"]}
+        except (OSError, ValueError):
+            pass
+    return {}
+
+
+def identify_accounts(state):
+    from router import labels, account_home, read_keychain, RouterError
+
+    updated = 0
+    for label in labels(state):
+        if account_identity(state, label).get("email"):
+            continue
+        try:
+            identity = read_keychain(account_home(state, label), include_identity=True)
+        except RouterError:
+            continue
+        if identity.get("email"):
+            settings.atomic_json(
+                account_home(state, label) / "identity.json",
+                {"email": identity["email"]},
+            )
+            updated += 1
+    return updated
+
+
 def resolve_label(state, value):
     from router import labels, RouterError
 
@@ -21,7 +56,10 @@ def resolve_label(state, value):
     pool = Pool(state)
     try:
         matching = [
-            label for label in labels(state) if pool.options(label).get("name") == value
+            label
+            for label in labels(state)
+            if pool.options(label).get("name") == value
+            or account_identity(state, label).get("email") == value
         ]
         if len(matching) == 1:
             return matching[0]
@@ -47,12 +85,14 @@ def snapshot(state, include_inactive=False):
             ]
         for label in labels(state):
             options = pool.options(label)
+            identity = account_identity(state, label)
             usage = pool.cached(label, 86400)
             windows = (usage or {}).get("rateLimits", {})
             accounts.append(
                 {
                     "id": label,
-                    "name": options.get("name", label),
+                    "name": options.get("name") or identity.get("email") or label,
+                    "email": identity.get("email"),
                     "enabled": options.get("enabled", True),
                     "priority": options.get("priority", 0),
                     "max_sessions": options.get("max_sessions", 0),
@@ -60,13 +100,27 @@ def snapshot(state, include_inactive=False):
                     "primary": windows.get("primary"),
                     "secondary": windows.get("secondary"),
                     "usage_known": usage is not None,
+                    "usage_checked_at": pool.checked_at(label),
                     "maintenance": options.get("maintenance", False),
-                    "next_check": max(
+                    "next_check": min(
                         (b["next_check"] for b in blocks if b["account"] == label),
                         default=None,
                     ),
                 }
             )
+        with pool.db() as db:
+            for session in sessions:
+                saved_intent = db.execute(
+                    "SELECT details FROM intents WHERE owner=? AND thread=?",
+                    (session["id"], session.get("thread", "")),
+                ).fetchone()
+                intent = json.loads(saved_intent[0]) if saved_intent else {}
+                session["reason"] = intent.get("review_reason") or intent.get("kind")
+                session["attempt"] = (intent.get("episode") or {}).get("attempt")
+                session["review_required"] = intent.get("review_required", False)
+                if session["review_required"]:
+                    session["state"] = "needs_attention"
+                session.setdefault("recovery_enabled", True)
         active = {s["id"] for s in sessions}
         with pool.db() as db:
             saved = {
@@ -119,13 +173,13 @@ def render(value):
     lines = [
         f"Relay · {len(value['sessions'])} sessions · {len(value['accounts'])} accounts",
         "",
-        f"{'ACCOUNT':<23}{'STATE':<13}{'SHORT LEFT':<13}{'WEEK LEFT':<13}{'SESSIONS':<10}NEXT CHECK",
+        f"{'ACCOUNT':<39}{'STATE':<13}{'SHORT LEFT':<13}{'WEEK LEFT':<13}{'SESSIONS':<10}NEXT CHECK",
     ]
     for account in value["accounts"]:
         label = (
             account["name"]
             + (" [" + account["id"] + "]" if account["name"] != account["id"] else "")
-        )[:22]
+        )[:38]
         state = (
             "maintenance"
             if account["maintenance"]
@@ -139,7 +193,7 @@ def render(value):
             else "—"
         )
         lines.append(
-            f"{label:<23}{state:<13}{percent(account['primary']):<13}{percent(account['secondary']):<13}{account['sessions']:<10}{next_at}"
+            f"{label:<39}{state:<13}{percent(account['primary']):<13}{percent(account['secondary']):<13}{account['sessions']:<10}{next_at}"
         )
     if value["sessions"]:
         lines += [
@@ -163,17 +217,30 @@ def render(value):
 
 
 async def status(args, state):
-    while True:
-        value = snapshot(state, getattr(args, "all", False))
-        if args.json:
-            print(json.dumps(value, indent=None if args.watch else 2), flush=True)
-        else:
-            if args.watch and sys.stdout.isatty():
-                print("\033[2J\033[H", end="")
-            print(render(value), flush=True)
-        if not args.watch:
-            return 0
-        await asyncio.sleep(args.interval)
+    from watch import LocalChanges, fingerprint
+
+    previous = None
+    watcher = LocalChanges(state) if args.watch else None
+    try:
+        while True:
+            value = snapshot(state, getattr(args, "all", False))
+            current = fingerprint(value)
+            if current != previous:
+                if args.json:
+                    print(
+                        json.dumps(value, indent=None if args.watch else 2), flush=True
+                    )
+                else:
+                    if args.watch and sys.stdout.isatty():
+                        print("\033[2J\033[H", end="")
+                    print(render(value), flush=True)
+                previous = current
+            if not args.watch:
+                return 0
+            await watcher.changed(max(1, args.interval))
+    finally:
+        if watcher:
+            watcher.close()
 
 
 async def control(args, state):
@@ -204,7 +271,13 @@ async def control(args, state):
         for session in matching:
             op = "resume" if args.command == "unpause" else args.command
             ident = pool.command(session["id"], op, params)
-            print(f"Queued {op} for {session['id'][:10]} (command {ident}).")
+            if getattr(args, "wait", False):
+                from service import wait_control
+
+                await wait_control(pool, ident, timeout=args.timeout)
+                print(f"{op.capitalize()} applied to {session['id'][:10]}.")
+            else:
+                print(f"Queued {op} for {session['id'][:10]} (command {ident}).")
         return 0
     finally:
         pool.close()
@@ -473,6 +546,37 @@ async def group(args, state, binary):
 
 
 def add_parsers(sub):
+    preview = sub.add_parser(
+        "explain", help="Preview a native Codex launch without starting a task"
+    )
+    preview.add_argument("codex_args", nargs="...")
+    diagnostics = sub.add_parser(
+        "diagnostics",
+        help="Export redacted operational facts without credentials, prompts, or project paths",
+    )
+    diagnostics.add_argument("output")
+    clean = sub.add_parser(
+        "clean", help="Preview safe cleanup of unreferenced old runtime files"
+    )
+    clean.add_argument("--apply", action="store_true")
+    clean.add_argument("--older-than", type=int, default=30, dest="days")
+    clean.add_argument(
+        "--jobs",
+        action="store_true",
+        help="Also remove old stopped jobs; saved workspace references are retained",
+    )
+    workspaces = sub.add_parser(
+        "workspace",
+        help="Save and restore the same conversations across several terminals",
+    )
+    ws = workspaces.add_subparsers(dest="action", required=True)
+    ws.add_parser("list")
+    save_ws = ws.add_parser("save")
+    save_ws.add_argument("name")
+    save_ws.add_argument("sessions", nargs="*")
+    for action in ("restore", "remove"):
+        child = ws.add_parser(action)
+        child.add_argument("name")
     status = sub.add_parser(
         "status", help="Account and session dashboard without live network requests"
     )
@@ -487,15 +591,28 @@ def add_parsers(sub):
         "restart", help="Restart a stopped session from saved history"
     )
     restart.add_argument("session")
-    status.add_argument("--interval", type=float, default=2)
+    restart.add_argument("--if-stopped", action="store_true")
+    status.add_argument(
+        "--interval",
+        type=float,
+        default=30,
+        help="Maximum local filesystem wait; output changes only when data changes",
+    )
     for command in ["pause", "unpause", "retry", "wake", "stop", "switch"]:
         p = sub.add_parser(command, help=command + " one live session or all")
         p.add_argument("target", nargs="?")
         p.add_argument("--thread")
+        p.add_argument(
+            "--wait",
+            action="store_true",
+            help="Wait for the worker to confirm the action",
+        )
+        p.add_argument("--timeout", type=float, default=15)
         if command == "switch":
             p.add_argument("--account", required=True)
     account = sub.add_parser("account", help="Manage any number of enrolled accounts")
     child = account.add_subparsers(dest="action", required=True)
+    child.add_parser("identify", help="Fill in account emails from saved local logins")
     for action in [
         "add",
         "reauth",
@@ -544,10 +661,21 @@ def add_parsers(sub):
     )
     runtime.add_argument("action", choices=["list", "cache", "use", "preflight"])
     runtime.add_argument("value", nargs="?")
+    startup = sub.add_parser(
+        "startup", help="Choose background sessions to recover at Mac login"
+    )
+    startup.add_argument("action", choices=["list", "enable", "disable"])
+    startup.add_argument("session", nargs="?")
     menu = sub.add_parser(
         "menubar", help="Build or launch the optional native menu app"
     )
     menu.add_argument("--build-only", action="store_true")
+    menu.add_argument(
+        "--no-startup", action="store_true", help="Disable menu login startup"
+    )
+    menu.add_argument(
+        "--configure-only", action="store_true", help="Only update the login setting"
+    )
     start = sub.add_parser(
         "start", help="Start a supervised background task; attach later"
     )
@@ -585,8 +713,64 @@ def add_parsers(sub):
 async def dispatch(args, state, binary):
     from router import RouterError
 
+    if args.command in {"explain", "diagnostics", "clean", "workspace"}:
+        import tools
+
+        if args.command == "explain":
+            result = tools.explain(args.codex_args, os.getcwd(), binary)
+        elif args.command == "diagnostics":
+            result = {"written": tools.diagnostics(state, args.output)}
+        elif args.command == "clean":
+            if args.days < 1:
+                raise ValueError("Retention must be at least one day")
+            from pool import file_lock
+
+            async with file_lock(state / "cleanup.lock"):
+                if args.apply:
+                    try:
+                        async with asyncio.timeout(2):
+                            async with file_lock(state / "metadata.lock"):
+                                result = tools.cleanup(
+                                    state, apply=True, days=args.days, jobs=args.jobs
+                                )
+                    except asyncio.TimeoutError:
+                        raise RouterError(
+                            "Stop supervised sessions before applying cleanup. The dry run works while sessions are active."
+                        ) from None
+                else:
+                    result = tools.cleanup(
+                        state, apply=args.apply, days=args.days, jobs=args.jobs
+                    )
+        else:
+            result = tools.workspace(
+                state,
+                args.action,
+                getattr(args, "name", None),
+                getattr(args, "sessions", None),
+                binary,
+            )
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.command == "startup":
+        import desktop
+
+        if args.action != "list" and not args.session:
+            raise ValueError("Choose a saved session ID")
+        print(
+            json.dumps(desktop.job_startup(state, args.action, args.session), indent=2)
+        )
+        return 0
     if args.command == "restart":
         import service
+
+        if args.if_stopped:
+            pool = Pool(state)
+            try:
+                ident = service.resolve(state, args.session)
+                if any(s["id"] == ident for s in pool.detail()):
+                    return 0
+            finally:
+                pool.close()
 
         async with file_lock(state / "restart.lock"):
             ident = service.restart(state, args.session)
@@ -599,6 +783,11 @@ async def dispatch(args, state, binary):
     if args.command in {"pause", "unpause", "retry", "wake", "stop", "switch"}:
         return await control(args, state)
     if args.command == "account":
+        if args.action == "identify":
+            print(
+                f"Identified {await asyncio.to_thread(identify_accounts, state)} saved accounts."
+            )
+            return 0
         return await manage(args, state, binary)
     if args.command == "config":
         if args.key:
@@ -670,7 +859,17 @@ async def dispatch(args, state, binary):
     if args.command == "menubar":
         import desktop
 
-        app = await asyncio.to_thread(desktop.menubar, state, None, args.build_only)
+        if args.no_startup or args.configure_only:
+            desktop.login_item(state, enabled=not args.no_startup)
+            if args.configure_only:
+                print(
+                    "Menu login startup "
+                    + ("disabled" if args.no_startup else "enabled")
+                )
+                return 0
+        app = await asyncio.to_thread(
+            desktop.menubar, state, None, args.build_only, not args.no_startup
+        )
         print(str(app))
         return 0
     if args.command == "group":

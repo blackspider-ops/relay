@@ -23,3 +23,5 @@ jobs:
           PYTHONPATH: python:tests
       - run: npm test
       - run: npm run check
+      - run: swiftc python/Menu.swift -o /tmp/relay-menu-check
+        if: matrix.python == '3.13'
