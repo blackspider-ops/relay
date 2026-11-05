@@ -1,0 +1,2 @@
+websockets>=15,<16
+jsonschema>=4.25,<5

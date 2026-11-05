@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">Relay</title>
+  <desc id="desc">Keep Codex moving. Four paths meet in one forward arrow.</desc>
+  <rect width="1280" height="360" rx="24" fill="#111916"/>
+  <g fill="none" stroke="#a8d9bd" stroke-width="10" stroke-linecap="round">
+    <path d="M96 108h62c48 0 44 72 94 72h44" opacity=".5"/>
+    <path d="M96 156h82c34 0 30 24 72 24h46" opacity=".7"/>
+    <path d="M96 204h82c34 0 30-24 72-24h46"/>
+    <path d="M96 252h62c48 0 44-72 94-72h44" opacity=".5"/>
+    <path d="m278 158 24 22-24 22" stroke="#f7be74"/>
+  </g>
+  <text x="366" y="185" fill="#f5f3ec" font-family="Helvetica Neue,Arial,sans-serif" font-size="98" font-weight="650" letter-spacing="-5">Relay</text>
+  <text x="371" y="239" fill="#acb9b0" font-family="Helvetica Neue,Arial,sans-serif" font-size="27" letter-spacing=".2">Keep Codex moving.</text>
+  <text x="1140" y="73" text-anchor="end" fill="#a8d9bd" font-family="Menlo,monospace" font-size="15">FOR YOUR TERMINAL</text>
+</svg>
