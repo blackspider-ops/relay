@@ -68,6 +68,9 @@ at Mac login. `relay menubar --no-startup --configure-only` disables login start
 Use a session's menu to switch accounts after its work finishes. Account menus can
 enable or disable future routing without stopping current tasks. Actions show
 their result, and stopped workers offer a restart.
+Account menus also show earned usage resets when available. Choose **Use available
+reset…** and confirm to spend one; Relay refreshes allowance afterward. Recovery
+never spends these resets automatically.
 
 For tab completion in Zsh, run `source <(relay completion zsh)` after `compinit`.
 Bash users can run `source <(relay completion bash)`. Add the same line to your

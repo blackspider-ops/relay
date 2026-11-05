@@ -40,6 +40,7 @@ relay account priority personal 10
 relay account cap personal 2
 relay account models personal YOUR_MODEL
 relay account reauth personal
+relay account reset personal --yes
 relay account remove personal
 ```
 
@@ -48,6 +49,24 @@ for earlier installations without another sign-in. Commands accept an account's
 label, unique email, or chosen display name. Renaming keeps the login usable.
 A session cap of zero means unlimited. Removing an account retains its login
 unless you request `--revoke`.
+
+The account menu shows **Usage resets available** and **Use available reset…**
+when Codex reports an earned reset. Choose it and confirm to use one. If the count
+is unknown, choose **Check allowance now** first. Reset availability is separate
+from purchased workspace credits. Resets are never spent by automatic recovery.
+
+The equivalent terminal command is `relay account reset ACCOUNT --yes`. If a
+response is lost, use the same action again: Relay saves and reuses the pending
+request rather than submitting a new redemption. The menu calls this **Check
+previous reset…**. An optional `--request-id UUID` also identifies a specific
+logical attempt. Codex chooses the available reset; Relay checks the returned
+result and reads allowance again afterward.
+
+A reset only releases quota blocks when refreshed allowance permits it. Paused
+tasks, required reviews, and unrelated retry delays are retained. If the reset
+was used but allowance refresh failed, check allowance again; do not spend
+another reset to refresh the display.
+This uses the [documented Codex reset interface](https://learn.chatgpt.com/docs/app-server#8-earned-rate-limit-resets-chatgpt).
 
 ## Launch and recovery
 

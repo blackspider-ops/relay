@@ -126,12 +126,32 @@ for raw in sys.stdin:
         elif method == "account/login/start":
             result = {"type": params["type"]}
         elif method == "account/rateLimits/read":
+            reset_count = change(lambda d: d.get("reset_credit_count", 1))
             result = {
                 "ordinaryUsageAllowed": True,
                 "rateLimits": {
                     "primary": {"usedPercent": 20, "resetsAt": int(time.time()) + 3600}
                 },
+                "rateLimitResetCredits": {
+                    "availableCount": reset_count,
+                    "credits": None,
+                },
             }
+        elif method == "account/rateLimitResetCredit/consume":
+
+            def redeem(data):
+                keys = data.setdefault("reset_keys", [])
+                key = params["idempotencyKey"]
+                if key in keys:
+                    return {"outcome": "alreadyRedeemed"}
+                count = data.get("reset_credit_count", 1)
+                if count <= 0:
+                    return {"outcome": "noCredit"}
+                keys.append(key)
+                data["reset_credit_count"] = count - 1
+                return {"outcome": "reset"}
+
+            result = change(redeem)
         elif method in ("thread/start", "thread/fork"):
             thread = str(uuid.uuid4())
             value = {

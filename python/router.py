@@ -24,7 +24,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -2274,7 +2274,7 @@ def selected_binary(args, state):
         return None
     if (
         args.command == "account"
-        and args.action not in {"add", "reauth"}
+        and args.action not in {"add", "reauth", "reset"}
         and not getattr(args, "revoke", False)
     ):
         return None

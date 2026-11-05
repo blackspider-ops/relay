@@ -77,6 +77,7 @@ def remaining_percent(window):
 
 def snapshot(state, include_inactive=False):
     from router import labels, VERSION
+    import resets
 
     pool = Pool(state)
     try:
@@ -111,6 +112,8 @@ def snapshot(state, include_inactive=False):
                     "weekly_remaining": remaining_percent(windows.get("secondary")),
                     "usage_known": usage is not None,
                     "usage_checked_at": pool.checked_at(label),
+                    "reset_credits": resets.available(usage),
+                    "reset_pending": resets.pending(state / "accounts" / label),
                     "maintenance": options.get("maintenance", False),
                     "next_check": min(
                         (b["next_check"] for b in blocks if b["account"] == label),
@@ -313,6 +316,16 @@ async def _manage(args, state, binary):
     pool = Pool(state)
     try:
         label = resolve_label(state, args.label) if args.action != "add" else args.label
+        if args.action == "reset":
+            import resets
+
+            if not args.yes:
+                raise RouterError(
+                    "This uses one earned usage reset for this account. Add --yes to confirm, or use the menu's Use available reset action."
+                )
+            result = await resets.consume(state, label, binary, args.request_id)
+            print(resets.message(result))
+            return 0
         if args.action in {"enable", "disable", "priority", "cap", "rename", "models"}:
             if args.action in {"enable", "disable"}:
                 pool.set_options(label, enabled=args.action == "enable")
@@ -648,6 +661,7 @@ def add_parsers(sub):
         "priority",
         "cap",
         "models",
+        "reset",
     ]:
         p = child.add_parser(action)
         p.add_argument("label")
@@ -661,6 +675,16 @@ def add_parsers(sub):
             p.add_argument("value", type=int)
         if action == "models":
             p.add_argument("values", nargs="*")
+        if action == "reset":
+            p.add_argument(
+                "--yes",
+                action="store_true",
+                help="Confirm using one earned usage reset",
+            )
+            p.add_argument(
+                "--request-id",
+                help="Optional UUID; reuse it to check the same redemption attempt",
+            )
     config = sub.add_parser("config", help="Set global or named recovery profiles")
     config.add_argument("key", nargs="?")
     config.add_argument("value", nargs="?")

@@ -1,5 +1,12 @@
 # Changes
 
+## 0.7.0
+
+- Show each account’s available earned usage resets and add an explicit confirmed redemption action.
+- Reuse a durable request ID when checking an uncertain reset, including after a restart.
+- Refresh allowance after a reset and wake eligible waiting tasks while retaining pause/review holds.
+- Report no available credit, no eligible limit, unsupported runtimes, and uncertain responses distinctly.
+
 ## 0.6.1
 
 - Mark accounts in use in the main menu and show how many live sessions share them.

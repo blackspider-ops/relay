@@ -228,6 +228,15 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             text("Last checked: \(lastChecked)", into: submenu)
             if let id = account["id"] as? String {
                 submenu.addItem(.separator())
+                let pendingReset = account["reset_pending"] as? Bool ?? false
+                let resetCount = (account["reset_credits"] as? NSNumber)?.intValue
+                if let count = resetCount { text("Usage resets available: \(count)", into: submenu) }
+                else { text("Usage resets: check allowance to see availability.", into: submenu) }
+                if pendingReset || (resetCount ?? 0) > 0 {
+                    let reset = action(pendingReset ? "Check previous reset…" : "Use available reset…", args: ["confirm-reset", id, name, pendingReset ? "pending" : "new"], into: submenu)
+                    reset.isEnabled = !actionRunning && !(account["maintenance"] as? Bool ?? false)
+                }
+                submenu.addItem(.separator())
                 let enabled = account["enabled"] as? Bool ?? true
                 action(enabled ? "Disable for future routing" : "Enable for routing", args: ["account", enabled ? "disable" : "enable", id], into: submenu)
                 text("Current tasks keep running.", into: submenu)
@@ -307,16 +316,29 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             args = ["retry", args[1], "--wait"]
         }
+        if args[0] == "confirm-reset" {
+            let pending = args[3] == "pending"
+            let alert = NSAlert(); alert.messageText = pending ? "Check the previous reset?" : "Use one usage reset?"
+            alert.informativeText = args[2] + "\n\n" + (pending ? "Relay will check the same pending request. If it already used a reset, another one will not be spent." : "This spends one earned reset on eligible usage limits for this account. Allowance will be checked afterward. Paused tasks and review holds stay paused.")
+            alert.addButton(withTitle: pending ? "Check reset" : "Use reset"); alert.addButton(withTitle: "Cancel")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            args = ["account", "reset", args[1], "--yes", "--request-id", UUID().uuidString]
+        }
         actionRunning = true; actionFailed = false; actionNotice = "Applying change…"; render()
-        let proc = process(args); let pipe = Pipe(); proc.standardOutput = FileHandle.nullDevice; proc.standardError = pipe
+        let isReset = Array(args.prefix(2)) == ["account", "reset"]
+        let proc = process(args); let pipe = Pipe()
+        if isReset { proc.standardOutput = pipe } else { proc.standardOutput = FileHandle.nullDevice }
+        proc.standardError = pipe
         DispatchQueue.global(qos: .utility).async { [weak self] in
             do {
                 try proc.run(); let bytes = pipe.fileHandleForReading.readDataToEndOfFile(); proc.waitUntilExit()
                 let failed = proc.terminationStatus != 0
                 let detail = String(data: bytes, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let resetResult = detail.split(separator: "\n").last.map(String.init) ?? "Reset check finished. Check the account's allowance."
                 DispatchQueue.main.async {
                     self?.actionRunning = false; self?.actionFailed = failed
-                    self?.actionNotice = failed ? (detail.isEmpty ? "Action failed. Check relay events." : detail) : MenuController.successMessage(args)
+                    self?.actionNotice = failed ? (detail.isEmpty ? "Action failed. Check relay events." : detail) : isReset ? resetResult : MenuController.successMessage(args)
                     self?.render(); self?.refreshSnapshot()
                 }
             } catch { DispatchQueue.main.async { self?.actionRunning = false; self?.actionFailed = true; self?.actionNotice = "Could not run that action."; self?.render() } }
@@ -390,6 +412,13 @@ if CommandLine.arguments.contains("--self-check") {
     let empty = controller.makeMenu()
     let correctEmpty = empty.items.contains { $0.title.contains("No Relay sessions running") } && empty.items.first { $0.identifier?.rawValue == "account:one" }?.state == .off
     controller.current["sessions"] = originalSessions
+    let originalAccounts = controller.current["accounts"]
+    controller.current["accounts"] = [["id": "one", "name": "One", "reset_credits": 2], ["id": "two", "name": "Two", "reset_credits": 0], ["id": "unknown", "name": "Unknown"], ["id": "pending", "name": "Pending", "reset_pending": true]]
+    let resets = controller.makeMenu()
+    let correctResets = findAction(["confirm-reset", "one", "One", "new"], in: resets)?.isEnabled == true && findAction(["confirm-reset", "two", "Two", "new"], in: resets) == nil && findAction(["confirm-reset", "unknown", "Unknown", "new"], in: resets) == nil && findAction(["confirm-reset", "pending", "Pending", "pending"], in: resets) != nil
+    controller.actionRunning = true
+    let resetLocked = findAction(["confirm-reset", "one", "One", "new"], in: controller.makeMenu())?.isEnabled == false
+    controller.current["accounts"] = originalAccounts
     controller.actionRunning = true; controller.actionNotice = "Applying change…"
     let pending = controller.makeMenu()
     let correctPending = findAction(switchArgs, in: pending)?.isEnabled == false && findAction(["refresh"], in: pending)?.isEnabled == false && findAction(["copy", "relay attach live"], in: pending)?.isEnabled == true
@@ -399,7 +428,8 @@ if CommandLine.arguments.contains("--self-check") {
     print("Account choices and stopped controls correct: \(correctChoices && stoppedControls)")
     print("Pending action protected and result retained: \(correctPending && retainedResult)")
     print("In-use accounts and current choice marked: \(correctMarker && correctMultiple && correctEmpty)")
-    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult && correctMarker && correctMultiple && correctEmpty ? 0 : 1)
+    print("Available and pending reset actions protected: \(correctResets && resetLocked)")
+    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult && correctMarker && correctMultiple && correctEmpty && correctResets && resetLocked ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = MenuController(); app.delegate = delegate; app.run()
