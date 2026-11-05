@@ -99,6 +99,29 @@ class Lifecycle(unittest.IsolatedAsyncioTestCase):
                     selected_binary(parser().parse_args(["status"]), state)
                 )
 
+    def test_verified_snapshot_is_used_when_global_codex_is_missing(self):
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            native = state / "native"
+            native.write_bytes(b"verified test snapshot")
+            atomic_json(
+                state / "runtimes.json",
+                {
+                    "runtimes": [
+                        {
+                            "binary": str(native),
+                            "sha256": hashlib.sha256(native.read_bytes()).hexdigest(),
+                        }
+                    ]
+                },
+            )
+            with patch("router.codex_path", side_effect=RouterError("not installed")):
+                self.assertEqual(
+                    selected_binary(parser().parse_args(["check"]), state), str(native)
+                )
+
     async def test_compatible_older_coordinator_is_reused_without_interrupting_it(self):
         with tempfile.TemporaryDirectory() as directory:
             with (

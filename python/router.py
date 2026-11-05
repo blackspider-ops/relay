@@ -1963,6 +1963,12 @@ async def dispatch(args, state, binary):
 def selected_binary(args, state):
     if args.command == "_broker" and args.binary:
         return args.binary
+    if (
+        args.command == "runtime"
+        and args.action in {"cache", "preflight"}
+        and args.value
+    ):
+        return args.value
     if args.command == "_serve":
         job = state / "services" / (args.session + ".job.json")
         if job.exists():
@@ -1999,6 +2005,7 @@ def selected_binary(args, state):
     try:
         return codex_path()
     except RouterError:
+        import compatibility
         import runtime
 
         for row in reversed(runtime.index(state)["runtimes"]):
