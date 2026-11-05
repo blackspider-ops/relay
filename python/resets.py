@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import time
 import uuid
 
@@ -9,6 +10,29 @@ from pool import Pool, blocked, reset_time
 from settings import atomic_json
 
 OUTCOMES = {"reset", "alreadyRedeemed", "nothingToReset", "noCredit"}
+WEEKLY_RESET_BUFFER = 48 * 60 * 60
+
+
+def weekly_block_reason(snapshot, now=None):
+    window = ((snapshot or {}).get("rateLimits") or {}).get("secondary")
+    if not isinstance(window, dict):
+        return (
+            "Reset locked: check allowance to confirm the weekly limit and reset time."
+        )
+    used, at = window.get("usedPercent"), window.get("resetsAt")
+    if type(used) not in (int, float) or not math.isfinite(used):
+        return (
+            "Reset locked: check allowance to confirm the weekly limit and reset time."
+        )
+    if used < 100:
+        return "Reset locked: weekly allowance must be fully exhausted (0%)."
+    if type(at) not in (int, float) or not math.isfinite(at):
+        return (
+            "Reset locked: check allowance to confirm the weekly limit and reset time."
+        )
+    if at - (time.time() if now is None else now) <= WEEKLY_RESET_BUFFER:
+        return "Reset locked: the weekly reset must be more than 48 hours away."
+    return None
 
 
 def available(snapshot):
@@ -122,13 +146,16 @@ async def consume(state, label, binary, request_id=None):
                 )
             if known and outcome == "reset":
                 outcome = "alreadyRedeemed"
-            if not retry and not known:
+            if not known:
                 current = await rpc.call("account/rateLimits/read")
                 update_allowance(pool, label, current)
+                reason = weekly_block_reason(current)
+                if reason:
+                    raise RouterError(reason)
                 count = available(current)
-                if count == 0:
+                if count == 0 and not retry:
                     return {"outcome": "noCredit", "refreshed": True}
-                if count is None:
+                if count is None and not retry:
                     raise RouterError(
                         "Codex did not report reset availability. Check allowance again before using a reset."
                     )

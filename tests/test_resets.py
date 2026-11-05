@@ -27,6 +27,8 @@ class ResetService:
         self.residual_limit = False
         self.outcome = None
         self.reject = False
+        self.weekly_used = 100
+        self.weekly_at = time.time() + 72 * 3600
 
     async def call(self, method, params=None):
         await asyncio.sleep(0)
@@ -39,7 +41,11 @@ class ResetService:
                     "primary": {
                         "usedPercent": 100 if self.blocked else 0,
                         "resetsAt": time.time() + 3600,
-                    }
+                    },
+                    "secondary": {
+                        "usedPercent": self.weekly_used,
+                        "resetsAt": self.weekly_at,
+                    },
                 },
                 "rateLimitResetCredits": {
                     "availableCount": self.count,
@@ -194,11 +200,67 @@ class ResetTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RouterError, "--yes"):
                 await commands.manage(args, self.root, "fake")
 
+    async def test_weekly_guard_blocks_all_mutation_until_zero_and_more_than_48_hours(
+        self,
+    ):
+        for used, hours in ((0, 72), (99.99, 72), (100, 48), (100, 47), (100, -1)):
+            with self.subTest(used=used, hours=hours):
+                self.service.weekly_used = used
+                self.service.weekly_at = time.time() + hours * 3600
+                with self.assertRaisesRegex(RouterError, "Reset locked"):
+                    await resets.consume(self.root, "one", "fake")
+                self.assertFalse(self.service.calls)
+                self.assertFalse((self.home / "reset-attempt.json").exists())
+        self.service.weekly_used = 100
+        self.service.weekly_at = time.time() + 72 * 3600
+        result = await resets.consume(self.root, "one", "fake")
+        self.assertEqual(result["outcome"], "reset")
+
+    async def test_pending_retry_cannot_bypass_a_changed_weekly_guard(self):
+        self.service.lose_reply = True
+        with self.assertRaises(RouterError):
+            await resets.consume(self.root, "one", "fake")
+        self.service.weekly_used = 0
+        with self.assertRaisesRegex(RouterError, "fully exhausted"):
+            await resets.consume(self.root, "one", "fake")
+        self.assertEqual(len(self.service.calls), 1)
+        self.assertTrue(resets.pending(self.home))
+        self.assertEqual(self.service.count, 1)
+
+    def test_weekly_guard_exact_boundary_unknown_values_and_unrounded_allowance(self):
+        now = 2000000000
+
+        def usage(used, at):
+            return {"rateLimits": {"secondary": {"usedPercent": used, "resetsAt": at}}}
+
+        self.assertIsNone(resets.weekly_block_reason(usage(100, now + 172801), now))
+        for used, at in (
+            (100, now + 172800),
+            (100, now + 172799),
+            (99.999, now + 200000),
+            (100, None),
+            (None, now + 200000),
+            (float("nan"), now + 200000),
+            (100, float("inf")),
+        ):
+            self.assertIsNotNone(resets.weekly_block_reason(usage(used, at), now))
+        self.assertIsNotNone(resets.weekly_block_reason({}, now))
+
     async def test_real_jsonl_helper_redeems_and_refreshes_synthetic_account(self):
         from test_services import fake_executable
 
         self.patch.stop()
         binary = fake_executable(self.root)
+        atomic_json(
+            self.home / "fake-history.json",
+            {
+                "threads": {},
+                "calls": [],
+                "reset_credit_count": 1,
+                "reset_weekly_used": 100,
+                "reset_weekly_at": time.time() + 72 * 3600,
+            },
+        )
         result = await resets.consume(self.root, "one", binary)
         self.assertEqual(result, {"outcome": "reset", "refreshed": True})
         history = json.loads((self.home / "fake-history.json").read_text())

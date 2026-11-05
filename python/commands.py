@@ -114,6 +114,7 @@ def snapshot(state, include_inactive=False):
                     "usage_checked_at": pool.checked_at(label),
                     "reset_credits": resets.available(usage),
                     "reset_pending": resets.pending(state / "accounts" / label),
+                    "reset_lock_reason": resets.weekly_block_reason(usage),
                     "maintenance": options.get("maintenance", False),
                     "next_check": min(
                         (b["next_check"] for b in blocks if b["account"] == label),

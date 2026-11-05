@@ -12,6 +12,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var reconnect: DispatchWorkItem?
     var stopping = false
     var snapshotInFlight = false
+    var resetExpiry: DispatchWorkItem?
+    var menuOpen = false
     let command = Bundle.main.object(forInfoDictionaryKey: "RelayCommand") as? String ?? "/usr/bin/false"
     let state = Bundle.main.object(forInfoDictionaryKey: "RelayState") as? String ?? ""
 
@@ -140,6 +142,15 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let seconds = value as? Double, seconds.isFinite, seconds > 0 else { return nil }
         return seconds
     }
+    static func resetBlockReason(_ account: [String: Any], now: Double = Date().timeIntervalSince1970) -> String? {
+        guard let weekly = account["secondary"] as? [String: Any], let used = (weekly["usedPercent"] as? NSNumber)?.doubleValue, used.isFinite else {
+            return "Reset locked: check allowance to confirm the weekly limit and reset time."
+        }
+        guard used >= 100 else { return "Reset locked: weekly allowance must be fully exhausted (0%)." }
+        guard let at = timestamp(weekly["resetsAt"]) else { return "Reset locked: check allowance to confirm the weekly limit and reset time." }
+        guard at - now > 48 * 60 * 60 else { return "Reset locked: the weekly reset must be more than 48 hours away." }
+        return nil
+    }
     static func accountTimingRows(_ account: [String: Any]) -> [TimingRow] {
         var rows: [TimingRow] = []
         if let primary = account["primary"] as? [String: Any], let at = timestamp(primary["resetsAt"]) {
@@ -182,6 +193,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateTimes(menu)
         if let visible = item.menu { MenuController.synchronise(visible, with: menu) }
         else { item.menu = menu }
+        if menuOpen { scheduleResetExpiry() }
     }
     func makeMenu() -> NSMenu {
         let sessions = current["sessions"] as? [[String: Any]] ?? []
@@ -233,8 +245,10 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let count = resetCount { text("Usage resets available: \(count)", into: submenu) }
                 else { text("Usage resets: check allowance to see availability.", into: submenu) }
                 if pendingReset || (resetCount ?? 0) > 0 {
+                    let blocked = MenuController.resetBlockReason(account)
                     let reset = action(pendingReset ? "Check previous reset…" : "Use available reset…", args: ["confirm-reset", id, name, pendingReset ? "pending" : "new"], into: submenu)
-                    reset.isEnabled = !actionRunning && !(account["maintenance"] as? Bool ?? false)
+                    reset.isEnabled = !actionRunning && !(account["maintenance"] as? Bool ?? false) && blocked == nil
+                    if let blocked = blocked { text(blocked, into: submenu) }
                 }
                 submenu.addItem(.separator())
                 let enabled = account["enabled"] as? Bool ?? true
@@ -298,11 +312,36 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return menu
     }
     func menuWillOpen(_ menu: NSMenu) {
+        menuOpen = true
+        render()
         refreshSnapshot()
         updateTimes(menu)
         for entry in menu.items where entry.title == "Open at login" {
             entry.state = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.relay.menu.plist") ? .on : .off
         }
+    }
+    func scheduleResetExpiry() {
+        resetExpiry?.cancel()
+        let now = Date().timeIntervalSince1970
+        let accounts = current["accounts"] as? [[String: Any]] ?? []
+        let boundaries = accounts.compactMap { account -> Double? in
+            guard MenuController.resetBlockReason(account, now: now) == nil, let weekly = account["secondary"] as? [String: Any], let at = MenuController.timestamp(weekly["resetsAt"]) else { return nil }
+            return at - 48 * 60 * 60
+        }
+        if let boundary = boundaries.min() {
+            let expiry = DispatchWorkItem { [weak self] in self?.render() }
+            resetExpiry = expiry
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, boundary - now), execute: expiry)
+        }
+    }
+    func menuDidClose(_ menu: NSMenu) { menuOpen = false; resetExpiry?.cancel(); resetExpiry = nil }
+    func resetAllowed(_ id: String) -> Bool {
+        let accounts = current["accounts"] as? [[String: Any]] ?? []
+        guard let account = accounts.first(where: { $0["id"] as? String == id }) else {
+            actionNotice = "Reset locked: account details are unavailable."; actionFailed = true; render(); return false
+        }
+        if let reason = MenuController.resetBlockReason(account) { actionNotice = reason; actionFailed = true; render(); return false }
+        return true
     }
     @objc func runAction(_ sender: NSMenuItem) {
         guard var args = sender.representedObject as? [String], !args.isEmpty else { return }
@@ -317,12 +356,14 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             args = ["retry", args[1], "--wait"]
         }
         if args[0] == "confirm-reset" {
+            guard resetAllowed(args[1]) else { return }
             let pending = args[3] == "pending"
             let alert = NSAlert(); alert.messageText = pending ? "Check the previous reset?" : "Use one usage reset?"
             alert.informativeText = args[2] + "\n\n" + (pending ? "Relay will check the same pending request. If it already used a reset, another one will not be spent." : "This spends one earned reset on eligible usage limits for this account. Allowance will be checked afterward. Paused tasks and review holds stay paused.")
             alert.addButton(withTitle: pending ? "Check reset" : "Use reset"); alert.addButton(withTitle: "Cancel")
             NSApp.activate(ignoringOtherApps: true)
             guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard resetAllowed(args[1]) else { return }
             args = ["account", "reset", args[1], "--yes", "--request-id", UUID().uuidString]
         }
         actionRunning = true; actionFailed = false; actionNotice = "Applying change…"; render()
@@ -413,11 +454,18 @@ if CommandLine.arguments.contains("--self-check") {
     let correctEmpty = empty.items.contains { $0.title.contains("No Relay sessions running") } && empty.items.first { $0.identifier?.rawValue == "account:one" }?.state == .off
     controller.current["sessions"] = originalSessions
     let originalAccounts = controller.current["accounts"]
-    controller.current["accounts"] = [["id": "one", "name": "One", "reset_credits": 2], ["id": "two", "name": "Two", "reset_credits": 0], ["id": "unknown", "name": "Unknown"], ["id": "pending", "name": "Pending", "reset_pending": true]]
+    controller.current["accounts"] = [["id": "one", "name": "One", "reset_credits": 2, "secondary": ["usedPercent": 100, "resetsAt": Date().timeIntervalSince1970 + 72 * 3600]], ["id": "two", "name": "Two", "reset_credits": 0], ["id": "unknown", "name": "Unknown"], ["id": "pending", "name": "Pending", "reset_pending": true]]
     let resets = controller.makeMenu()
     let correctResets = findAction(["confirm-reset", "one", "One", "new"], in: resets)?.isEnabled == true && findAction(["confirm-reset", "two", "Two", "new"], in: resets) == nil && findAction(["confirm-reset", "unknown", "Unknown", "new"], in: resets) == nil && findAction(["confirm-reset", "pending", "Pending", "pending"], in: resets) != nil
     controller.actionRunning = true
     let resetLocked = findAction(["confirm-reset", "one", "One", "new"], in: controller.makeMenu())?.isEnabled == false
+    let policyNow = 2000000000.0
+    let far: [String: Any] = ["secondary": ["usedPercent": 100, "resetsAt": policyNow + 172801]]
+    let exact: [String: Any] = ["secondary": ["usedPercent": 100, "resetsAt": policyNow + 172800]]
+    let near: [String: Any] = ["secondary": ["usedPercent": 100, "resetsAt": policyNow + 172799]]
+    let left: [String: Any] = ["secondary": ["usedPercent": 99.99, "resetsAt": policyNow + 259200]]
+    let correctPolicy = MenuController.resetBlockReason(far, now: policyNow) == nil && MenuController.resetBlockReason(exact, now: policyNow) != nil && MenuController.resetBlockReason(near, now: policyNow) != nil && MenuController.resetBlockReason(left, now: policyNow) != nil && MenuController.resetBlockReason([:], now: policyNow) != nil
+    let pendingLocked = findAction(["confirm-reset", "pending", "Pending", "pending"], in: resets)?.isEnabled == false
     controller.current["accounts"] = originalAccounts
     controller.actionRunning = true; controller.actionNotice = "Applying change…"
     let pending = controller.makeMenu()
@@ -429,7 +477,8 @@ if CommandLine.arguments.contains("--self-check") {
     print("Pending action protected and result retained: \(correctPending && retainedResult)")
     print("In-use accounts and current choice marked: \(correctMarker && correctMultiple && correctEmpty)")
     print("Available and pending reset actions protected: \(correctResets && resetLocked)")
-    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult && correctMarker && correctMultiple && correctEmpty && correctResets && resetLocked ? 0 : 1)
+    print("Weekly zero and more-than-48-hour guard enforced: \(correctPolicy && pendingLocked)")
+    exit(normal != nil && attention != nil && liveUpdate && safeIdentity && correctTiming && correctChoices && stoppedControls && correctPending && retainedResult && correctMarker && correctMultiple && correctEmpty && correctResets && resetLocked && correctPolicy && pendingLocked ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = MenuController(); app.delegate = delegate; app.run()

@@ -1,5 +1,12 @@
 # Changes
 
+## 0.7.1
+
+- Enable reset only with weekly allowance fully exhausted (0%) and its reset more than 48 hours away.
+- Keep reset disabled when weekly allowance or timing is unknown, with the reason shown in the menu.
+- Recheck fresh allowance before redemption and pending retries; exactly 48 hours remains locked.
+- Disable an open menu’s reset action at the time boundary without network polling.
+
 ## 0.7.0
 
 - Show each account’s available earned usage resets and add an explicit confirmed redemption action.

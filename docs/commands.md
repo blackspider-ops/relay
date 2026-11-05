@@ -51,13 +51,17 @@ A session cap of zero means unlimited. Removing an account retains its login
 unless you request `--revoke`.
 
 The account menu shows **Usage resets available** and **Use available reset…**
-when Codex reports an earned reset. Choose it and confirm to use one. If the count
+when Codex reports an earned reset. It is enabled only when weekly allowance is
+fully exhausted (0%) and the weekly reset is **more than 48 hours away**. Exactly
+48 hours, any weekly allowance left, or unknown weekly data keeps it disabled.
+The reason appears below the button. Choose it and confirm to use one. If the count
 is unknown, choose **Check allowance now** first. Reset availability is separate
 from purchased workspace credits. Resets are never spent by automatic recovery.
 
 The equivalent terminal command is `relay account reset ACCOUNT --yes`. If a
 response is lost, use the same action again: Relay saves and reuses the pending
-request rather than submitting a new redemption. The menu calls this **Check
+request rather than submitting a new redemption. Pending retries must satisfy
+the same weekly rule; their saved request is retained when locked. The menu calls this **Check
 previous reset…**. An optional `--request-id UUID` also identifies a specific
 logical attempt. Codex chooses the available reset; Relay checks the returned
 result and reads allowance again afterward.

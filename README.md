@@ -69,7 +69,8 @@ Use a session's menu to switch accounts after its work finishes. Account menus c
 enable or disable future routing without stopping current tasks. Actions show
 their result, and stopped workers offer a restart.
 Account menus also show earned usage resets when available. Choose **Use available
-reset…** and confirm to spend one; Relay refreshes allowance afterward. Recovery
+reset…** and confirm to spend one; Relay refreshes allowance afterward. The button
+is enabled only with weekly allowance at 0% and its reset more than 48 hours away. Recovery
 never spends these resets automatically.
 
 For tab completion in Zsh, run `source <(relay completion zsh)` after `compinit`.

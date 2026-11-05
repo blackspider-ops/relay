@@ -127,10 +127,21 @@ for raw in sys.stdin:
             result = {"type": params["type"]}
         elif method == "account/rateLimits/read":
             reset_count = change(lambda d: d.get("reset_credit_count", 1))
+            weekly = change(
+                lambda d: (
+                    {
+                        "usedPercent": d["reset_weekly_used"],
+                        "resetsAt": d["reset_weekly_at"],
+                    }
+                    if "reset_weekly_used" in d
+                    else None
+                )
+            )
             result = {
                 "ordinaryUsageAllowed": True,
                 "rateLimits": {
-                    "primary": {"usedPercent": 20, "resetsAt": int(time.time()) + 3600}
+                    "primary": {"usedPercent": 20, "resetsAt": int(time.time()) + 3600},
+                    "secondary": weekly,
                 },
                 "rateLimitResetCredits": {
                     "availableCount": reset_count,
@@ -149,6 +160,8 @@ for raw in sys.stdin:
                     return {"outcome": "noCredit"}
                 keys.append(key)
                 data["reset_credit_count"] = count - 1
+                if "reset_weekly_used" in data:
+                    data["reset_weekly_used"] = 0
                 return {"outcome": "reset"}
 
             result = change(redeem)
