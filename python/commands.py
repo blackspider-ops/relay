@@ -773,8 +773,6 @@ async def dispatch(args, state, binary):
         elif args.command == "clean":
             if args.days < 1:
                 raise ValueError("Retention must be at least one day")
-            from pool import file_lock
-
             async with file_lock(state / "cleanup.lock"):
                 if args.apply:
                     try:

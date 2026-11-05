@@ -246,6 +246,9 @@ async def attach(
             await send_control(state, ident, "detach")
             value = json.loads(meta.read_text())
             env["RELAY_TRANSPORT_TOKEN"] = value["token"]
+        from terminal import TerminalState
+
+        terminal_state = TerminalState()
         proc = await asyncio.create_subprocess_exec(
             binary,
             "--remote",
@@ -295,6 +298,7 @@ async def attach(
                     proc.kill()
                     await proc.wait()
             await asyncio.gather(waiter, return_exceptions=True)
+            terminal_state.restore()
         if replacement:
             print("Reconnecting to the recovered task…", flush=True)
             value = await connection(previous=value)
@@ -590,7 +594,7 @@ async def _serve(state, ident, binary):
         controller.backend_factory = factory
         thread_id = old_thread or spec.get("resume")
         if thread_id:
-            params = {"threadId": thread_id, **overrides}
+            params = {"threadId": thread_id, "excludeTurns": True, **overrides}
             if old:
                 controller.merge_settings(thread_id, persisted.get("settings", {}))
                 params.update(

@@ -2,6 +2,9 @@
 
 ## 0.7.3
 
+- Restore terminal modes after a disconnected frontend so mouse movements cannot leak into shell input.
+- Resume supervised workers using metadata and paginated history instead of a full-history response.
+- Fix the restart command's shared-lock scope.
 - Reconcile stale tool activity against matching full Codex history before waiting to switch accounts.
 - Continue quota recovery when a finished tool’s completion notification was missed.
 - Retain waits for running or unverified tools, approvals, child threads and pause state.

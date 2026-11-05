@@ -2,15 +2,70 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
+import pty
+import termios
 import tempfile
+import tty
 import unittest
+from unittest.mock import patch
 
 from router import Controller, RPC, RouterError
 from test_router import FakeAccount, FakeBackend, FakeClient, completed
 
 
 class ActivityTests(unittest.IsolatedAsyncioTestCase):
+    def test_forced_frontend_exit_restores_terminal_and_disables_mouse_reporting(self):
+        from terminal import TerminalState, RESET_MODES
+
+        master, slave = pty.openpty()
+
+        class Stream:
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return slave
+
+        try:
+            original = termios.tcgetattr(slave)
+            with patch("sys.stdin", Stream()), patch("sys.stdout", Stream()):
+                state = TerminalState()
+                tty.setraw(slave)
+                state.restore()
+                state.restore()
+            restored = termios.tcgetattr(slave)
+            # macOS may set the transient PENDIN flag when canonical mode returns.
+            restored[3] &= ~getattr(termios, "PENDIN", 0)
+            original[3] &= ~getattr(termios, "PENDIN", 0)
+            self.assertEqual(restored, original)
+            self.assertEqual(os.read(master, 4096), RESET_MODES)
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_noninteractive_output_receives_no_terminal_escape_codes(self):
+        import io
+        from terminal import TerminalState
+
+        output = io.StringIO()
+        with patch("sys.stdin", io.StringIO()), patch("sys.stdout", output):
+            TerminalState().restore()
+        self.assertEqual(output.getvalue(), "")
+
+    async def test_restart_dispatch_uses_the_shared_file_lock(self):
+        import commands
+        from router import parse_arguments
+
+        with tempfile.TemporaryDirectory() as folder:
+            with patch("service.restart", return_value="saved-session") as restart:
+                result = await commands.dispatch(
+                    parse_arguments(["restart", "saved-session"]), Path(folder), None
+                )
+                self.assertEqual(result, 0)
+                restart.assert_called_once()
+
     async def test_lost_completion_over_real_jsonl_recovers_without_backend_restart(
         self,
     ):

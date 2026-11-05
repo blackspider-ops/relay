@@ -246,6 +246,7 @@ class WorkerRegressions(unittest.IsolatedAsyncioTestCase):
             c.task = asyncio.create_task(service.serve(c.state, c.ident, c.binary))
             await wait_for(c.meta.exists)
         self.assertEqual(observed[0]["approvalsReviewer"], "auto_review")
+        self.assertTrue(observed[0]["excludeTurns"])
         self.assertIn("/private/tmp/audit-extra", observed[0]["runtimeWorkspaceRoots"])
         pool.close()
 

@@ -788,7 +788,10 @@ class Controller:
             if self.active_threads or self.active_items:
                 raise RouterError("Session is busy")
             if thread:
-                await self.backend.call("thread/resume", {"threadId": thread, **params})
+                await self.backend.call(
+                    "thread/resume",
+                    {"threadId": thread, "excludeTurns": True, **params},
+                )
                 self.merge_settings(thread, params)
             self.launch_overrides = {**self.launch_overrides, **params}
             if params.get("permissions"):
@@ -882,7 +885,7 @@ class Controller:
             self.active_item_threads.clear()
             self.item_revision += 1
             for thread in list(self.last_turn):
-                params = {"threadId": thread}
+                params = {"threadId": thread, "excludeTurns": True}
                 params.update(
                     {
                         k: v
