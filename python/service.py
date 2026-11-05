@@ -526,7 +526,6 @@ async def _serve(state, ident, binary):
                 "home": str(home),
                 "cwd": cwd,
             }
-            atomic_json(connection, meta)
 
             async def selected(ident, values):
                 nonlocal thread_id
@@ -565,7 +564,7 @@ async def _serve(state, ident, binary):
                 # Preserve the initial prompt privately until native acceptance is
                 # known. Do not put it in diagnostic events or status output.
                 await controller.forward(request, init_result)
-                if thread_id in controller.turn_ids and controller.turn_ids[thread_id]:
+                if controller.pending_intents.get(thread_id, {}).get("accepted"):
                     spec["prompt"] = None
                     spec["resume"] = thread_id
                     spec["state"] = "running"
@@ -617,6 +616,9 @@ async def _serve(state, ident, binary):
                             thread_id, controller.user_generation
                         )
                     )
+            # Publish the attachment only after accepted work and uncertainty
+            # have been reconciled. A frontend must not race recovery setup.
+            atomic_json(connection, meta)
             await controller.stopping.wait()
         spec["state"] = "stopped"
         atomic_json(spec_path, spec)

@@ -2,7 +2,7 @@ class RelayCodex < Formula
   desc "Keep Codex moving between your own accounts"
   homepage "https://github.com/blackspider-ops/relay"
   url "https://github.com/blackspider-ops/relay/releases/download/v0.4.1/relay-0.4.1.tar.gz"
-  sha256 "0db4a492d152e529e6eaf23eaaaf17989d6fcd6d778f29f273af2fa5bfd7f9f4"
+  sha256 "9a3ace5b14bec6a21aa6401c64720c1ca3fb7a7620338b4ece28be2c8c1fabe5"
   license "MIT"
 
   depends_on :macos
