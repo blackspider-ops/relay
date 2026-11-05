@@ -173,6 +173,45 @@ class Output:
                     changes=native.get("changes", []),
                     status="completed" if method == "item/completed" else "in_progress",
                 )
+            elif kind == "mcpToolCall":
+                translated.update(
+                    type="mcp_tool_call",
+                    server=native.get("server", ""),
+                    tool=native.get("tool", ""),
+                    arguments=native.get("arguments", {}),
+                    result=native.get("result"),
+                    error=native.get("error"),
+                    status="completed" if method == "item/completed" else "in_progress",
+                )
+            elif kind == "webSearch":
+                action = native.get("action") or {}
+                translated.update(
+                    type="web_search",
+                    query=native.get("query")
+                    or action.get("query")
+                    or action.get("queries", []),
+                    action=action,
+                )
+            elif kind == "plan":
+                translated.update(
+                    type="todo_list", items=native.get("plan", native.get("items", []))
+                )
+            elif kind == "collabAgentToolCall":
+                translated.update(
+                    type="collab_tool_call",
+                    tool=native.get("tool"),
+                    sender_thread_id=native.get("senderThreadId"),
+                    receiver_thread_ids=native.get("receiverThreadIds", []),
+                    prompt=native.get("prompt"),
+                    agents_states=native.get("agentsStates", {}),
+                    status=native.get("status"),
+                )
+            elif kind in {"imageView", "imageGeneration"}:
+                translated.update(
+                    type="image_view" if kind == "imageView" else "image_generation",
+                    path=native.get("path"),
+                    status=native.get("status"),
+                )
             else:
                 return
             self.write(

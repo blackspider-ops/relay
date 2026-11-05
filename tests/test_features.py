@@ -301,6 +301,31 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(output.done.is_set())
         self.assertEqual(output.status, 1)
 
+    async def test_exec_json_includes_tool_records(self):
+        output = execution.Output(True)
+        output.thread = "parent"
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            for kind in ("mcpToolCall", "webSearch", "collabAgentToolCall"):
+                await output.send(
+                    json.dumps(
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": "parent",
+                                "item": {"id": kind, "type": kind},
+                            },
+                        }
+                    )
+                )
+        self.assertEqual(
+            [
+                json.loads(line)["item"]["type"]
+                for line in stream.getvalue().splitlines()
+            ],
+            ["mcp_tool_call", "web_search", "collab_tool_call"],
+        )
+
     async def test_only_foreground_thread_can_finish_exec(self):
         output = execution.Output(True)
         output.thread = "parent"
