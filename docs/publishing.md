@@ -23,7 +23,10 @@ and workflow filename `publish.yml`. Select direct `npm publish` permission if
 releases should publish automatically. No long-lived publishing token is needed.
 A new trusted publisher must complete its first publish within npm's validation
 window. Run the workflow for an existing reviewed version tag, or publish the
-GitHub release; the workflow runs checks before publishing.
+GitHub release; the workflow runs checks before publishing. After the first
+successful trusted publish, set the repository variable
+`NPM_TRUSTED_PUBLISHING_READY=true` to enable automatic release publishing. Until
+then, releases do not launch a publishing attempt that requires authentication.
 
 Initial trust setup requires npm account verification. Interactive local
 `npm publish` also requires verification when package 2FA applies. Installing and

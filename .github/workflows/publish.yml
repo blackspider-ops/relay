@@ -16,6 +16,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
+    if: github.event_name == 'workflow_dispatch' || vars.NPM_TRUSTED_PUBLISHING_READY == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
