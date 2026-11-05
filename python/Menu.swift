@@ -99,7 +99,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 desired.removeItem(fresh); live.addItem(fresh); continue
             }
             let existing = live.items[index]
-            if existing.isSeparatorItem != fresh.isSeparatorItem {
+            if existing.isSeparatorItem != fresh.isSeparatorItem || existing.identifier != fresh.identifier {
                 live.removeItem(at: index); desired.removeItem(fresh); live.insertItem(fresh, at: index); continue
             }
             existing.title = fresh.title; existing.state = fresh.state
@@ -124,7 +124,8 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     func action(_ title: String, args: [String], into menu: NSMenu) {
         let entry = NSMenuItem(title: title, action: #selector(runAction(_:)), keyEquivalent: "")
-        entry.target = self; entry.representedObject = args; menu.addItem(entry)
+        entry.target = self; entry.representedObject = args
+        entry.identifier = NSUserInterfaceItemIdentifier("action:" + args.joined(separator: "|")); menu.addItem(entry)
     }
     func date(_ value: Any?) -> String {
         guard let seconds = value as? Double else { return "unknown" }
@@ -169,7 +170,9 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if weekly != "?" { text("Weekly window: \(weekly) left", into: submenu) }
             if let reset = account["next_check"] { countdown("Next check", value: reset, into: submenu) }
             text("Last checked: \(date(account["usage_checked_at"]))", into: submenu)
-            let entry = NSMenuItem(title: "\(name) · \(label)", action: nil, keyEquivalent: ""); entry.submenu = submenu; menu.addItem(entry)
+            let entry = NSMenuItem(title: "\(name) · \(label)", action: nil, keyEquivalent: "")
+            entry.identifier = NSUserInterfaceItemIdentifier("account:" + (account["id"] as? String ?? name))
+            entry.submenu = submenu; menu.addItem(entry)
         }
         if !sessions.isEmpty { menu.addItem(.separator()) }
         for session in sessions {
@@ -185,7 +188,9 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             action("Pause recovery", args: ["pause", id, "--wait"], into: submenu)
             action("Resume recovery", args: ["unpause", id, "--wait"], into: submenu)
             action("Review and retry…", args: ["confirm-retry", id], into: submenu)
-            let entry = NSMenuItem(title: "\(name) · \(status)", action: nil, keyEquivalent: ""); entry.submenu = submenu; menu.addItem(entry)
+            let entry = NSMenuItem(title: "\(name) · \(status)", action: nil, keyEquivalent: "")
+            entry.identifier = NSUserInterfaceItemIdentifier("session:" + id)
+            entry.submenu = submenu; menu.addItem(entry)
         }
         menu.addItem(.separator())
         action("Copy dashboard command", args: ["copy", "relay status --watch"], into: menu)
@@ -240,7 +245,13 @@ if CommandLine.arguments.contains("--self-check") {
     MenuController.synchronise(visible, with: updated)
     let liveUpdate = visible.items[0] === existing && existing.title == "Short 30%"
     print("Visible menu update preserved: \(liveUpdate)")
-    exit(normal != nil && attention != nil && liveUpdate ? 0 : 1)
+    existing.identifier = NSUserInterfaceItemIdentifier("session:old")
+    let replacement = NSMenu(); let newItem = NSMenuItem(title: "New task", action: nil, keyEquivalent: "")
+    newItem.identifier = NSUserInterfaceItemIdentifier("session:new"); replacement.addItem(newItem)
+    MenuController.synchronise(visible, with: replacement)
+    let safeIdentity = visible.items[0] !== existing && visible.items[0].identifier == newItem.identifier
+    print("Session action identity preserved: \(safeIdentity)")
+    exit(normal != nil && attention != nil && liveUpdate && safeIdentity ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = MenuController(); app.delegate = delegate; app.run()
