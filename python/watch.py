@@ -11,7 +11,7 @@ def fingerprint(value):
     """Heartbeats and sample time do not represent a dashboard change."""
     value = {**value, "at": None}
     value["sessions"] = [
-        {k: v for k, v in item.items() if k != "seen"}
+        {k: v for k, v in item.items() if k not in {"seen", "activity"}}
         for item in value.get("sessions", [])
     ]
     return json.dumps(value, sort_keys=True)

@@ -1,5 +1,10 @@
 # Changes
 
+## 0.7.5
+
+- Keep changing internal activity diagnostics from redrawing an otherwise unchanged dashboard.
+- Continue updating watched status for account changes and visible recovery state changes.
+
 ## 0.7.4
 
 - Keep native background terminals running while switching accounts after their model turn ends.

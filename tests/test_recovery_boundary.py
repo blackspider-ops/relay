@@ -17,6 +17,40 @@ from test_pool import Clock
 
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
+    def test_diagnostic_tool_changes_do_not_redraw_unchanged_dashboard(self):
+        from watch import fingerprint
+
+        first = {
+            "at": 1,
+            "sessions": [
+                {
+                    "id": "task",
+                    "state": "working",
+                    "account": "one",
+                    "seen": 1,
+                    "activity": {"items": ["tool-a"]},
+                }
+            ],
+        }
+        second = {
+            "at": 2,
+            "sessions": [
+                {
+                    "id": "task",
+                    "state": "working",
+                    "account": "one",
+                    "seen": 2,
+                    "activity": {"items": ["tool-b"], "disconnected": False},
+                }
+            ],
+        }
+        self.assertEqual(fingerprint(first), fingerprint(second))
+        second["sessions"][0]["state"] = "waiting_for_reset"
+        self.assertNotEqual(fingerprint(first), fingerprint(second))
+        second["sessions"][0]["state"] = "working"
+        second["sessions"][0]["account"] = "two"
+        self.assertNotEqual(fingerprint(first), fingerprint(second))
+
     def controller(
         self,
         *,
