@@ -128,6 +128,12 @@ for raw in sys.stdin:
             result = {"account": {"type": "chatgpt", "planType": "plus"}}
         elif method == "account/login/start":
             result = {"type": params["type"]}
+            send(
+                {
+                    "method": "account/updated",
+                    "params": {"authMode": "chatgptAuthTokens", "planType": "plus"},
+                }
+            )
         elif method == "account/rateLimits/read":
             reset_count = change(lambda d: d.get("reset_credit_count", 1))
             weekly = change(
@@ -215,6 +221,12 @@ for raw in sys.stdin:
                 value["itemsView"] = params.get("itemsView", "summary")
         elif method == "thread/loaded/list":
             result = {"data": change(lambda d: list(d["threads"]))}
+        elif method == "thread/backgroundTerminals/list":
+            result = {
+                "data": change(
+                    lambda d: d.get("backgrounds", {}).get(params["threadId"], [])
+                )
+            }
         elif method in {"turn/start", "review/start"}:
             thread = params["threadId"]
             turn = str(uuid.uuid4())
@@ -263,14 +275,22 @@ for raw in sys.stdin:
                         "params": {"threadId": thread, "item": tool},
                     }
                 )
-            if count <= fault.get("orphaned_activity_turns", 0):
+            if count <= fault.get("background_activity_turns", 0):
+                item_id = "background-" + turn
+                change(
+                    lambda d: (
+                        d.setdefault("backgrounds", {})
+                        .setdefault(thread, [])
+                        .append({"itemId": item_id, "processId": "test-background-job"})
+                    )
+                )
                 send(
                     {
                         "method": "item/started",
                         "params": {
                             "threadId": thread,
                             "item": {
-                                "id": "orphaned-" + turn,
+                                "id": item_id,
                                 "type": "commandExecution",
                                 "status": "inProgress",
                             },

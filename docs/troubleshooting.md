@@ -51,10 +51,11 @@ visible. Use Restart for a stopped worker rather than sending it live controls.
 
 **A usage-limit panel remains open and Relay says “waiting for activity.”**
 
-Update Relay if you are using a version older than 0.7.4. Missed or orphaned
-tool notifications could leave a finished turn marked as active. Relay checks
-full native history and the current backend's idle status before clearing stale
-activity. The usage panel does not need to be clicked. It keeps
+Update Relay if you are using a version older than 0.7.4. Background terminals
+and missed tool notifications could leave a finished turn marked as active.
+Relay checks native history and the current backend's status. Commands explicitly
+listed by Codex as background terminals can keep running while accounts change
+after the model turn ends. The usage panel does not need to be clicked. Relay keeps
 waiting when work is still running or completion cannot be verified; approvals
 and paused recovery still need attention. Existing workers retain the code they
 started with, so an update takes effect after that worker is relaunched.

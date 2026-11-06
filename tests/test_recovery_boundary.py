@@ -18,7 +18,12 @@ from test_pool import Clock
 
 class BoundaryTests(unittest.IsolatedAsyncioTestCase):
     def controller(
-        self, *, status="systemError", turn_status="failed", tool_status="completed"
+        self,
+        *,
+        status="systemError",
+        turn_status="failed",
+        tool_status="completed",
+        backgrounds=True,
     ):
         c = Controller(
             [FakeAccount("one"), FakeAccount("two")],
@@ -33,6 +38,17 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         original = c.backend.call
 
         async def call(method, params=None, **kw):
+            if method == "thread/backgroundTerminals/list":
+                return {
+                    "data": [
+                        {
+                            "itemId": "orphaned-lifecycle-id",
+                            "processId": "background-job",
+                        }
+                    ]
+                    if backgrounds
+                    else []
+                }
             if method == "thread/turns/list":
                 return {
                     "data": [
@@ -59,7 +75,7 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         c.backend.call = call
         return c
 
-    async def test_native_terminal_boundary_unblocks_quota_without_replaying_request(
+    async def test_known_background_terminal_unblocks_quota_without_replaying_request(
         self,
     ):
         c = self.controller()
@@ -76,13 +92,21 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
             {"status": "active"},
             {"status": "notLoaded"},
             {"turn_status": "inProgress"},
-            {"tool_status": "inProgress"},
-            {"tool_status": None},
+            {"tool_status": "inProgress", "backgrounds": False},
+            {"tool_status": None, "backgrounds": False},
+            {"backgrounds": False},
         ):
             with self.subTest(options=options):
                 c = self.controller(**options)
                 await c.reconcile_active_items()
                 self.assertTrue(c.active_items)
+
+    async def test_manual_switch_keeps_known_background_job_without_new_turn(self):
+        c = self.controller()
+        await c.control("switch", {"account": "two"})
+        self.assertEqual(c.account.label, "two")
+        self.assertFalse(c.active_items)
+        self.assertFalse(any(m == "turn/start" for m, _ in c.backend.calls))
 
     async def test_pending_approval_and_different_current_turn_still_block(self):
         for blocker in ("approval", "different-turn"):
@@ -317,17 +341,37 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                     await broker.exchange(state, {"op": "stop"})
                     await asyncio.wait_for(server, 3)
 
-    async def test_orphaned_activity_over_real_jsonl_switches_without_restart(self):
+    async def test_background_activity_over_real_jsonl_switches_without_restart(self):
+        class ResetPromptClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.blocked = False
+                self.saw_reset_prompt = False
+
+            async def send(self, raw):
+                message = json.loads(raw)
+                params = message.get("params", {})
+                error = params.get("error") or params.get("turn", {}).get("error") or {}
+                if (
+                    message.get("method") in {"error", "turn/completed"}
+                    and error.get("codexErrorInfo") == "usageLimitExceeded"
+                ):
+                    self.blocked = True
+                    self.saw_reset_prompt = True
+                if message.get("method") == "account/updated":
+                    self.blocked = False
+                await super().send(raw)
+
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             atomic_json(
-                root / "fault.json", {"quota_turns": 1, "orphaned_activity_turns": 1}
+                root / "fault.json", {"quota_turns": 1, "background_activity_turns": 1}
             )
             rpc = await RPC.start(fake_executable(root), root)
             c = Controller(
                 [FakeAccount("one"), FakeAccount("two")], rpc, report=lambda _: None
             )
-            c.client = FakeClient()
+            c.client = ResetPromptClient()
             rpc.handler = c.event
             try:
                 pid = rpc.proc.pid
@@ -360,6 +404,17 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(c.account.label, "two")
                 self.assertFalse(c.active_items)
                 self.assertEqual(rpc.proc.pid, pid)
+                history = json.loads((root / "fake-history.json").read_text())
+                self.assertTrue(history["backgrounds"][thread])
+                self.assertTrue(c.client.saw_reset_prompt)
+                self.assertFalse(c.client.blocked)
+                self.assertFalse(c.server_requests)
+                self.assertFalse(
+                    any(
+                        c["method"] == "account/rateLimitResetCredit/consume"
+                        for c in history["calls"]
+                    )
+                )
             finally:
                 if c.recovery:
                     c.recovery.cancel()

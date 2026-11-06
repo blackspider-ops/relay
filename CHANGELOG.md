@@ -2,7 +2,8 @@
 
 ## 0.7.4
 
-- Reconcile orphaned tool activity at a verified native idle boundary so a finished, failed turn can switch accounts.
+- Keep native background terminals running while switching accounts after their model turn ends.
+- Check native turn status, idle state and background item IDs before retiring those account-switch blockers.
 - Keep recovery blocked for active native work, incomplete tool history, approvals, changed turns, and user pauses.
 - Bind login refresh callbacks to the account being installed, including callbacks arriving before login completes.
 - Route the native auth-refresh failure into the authentication retry schedule.

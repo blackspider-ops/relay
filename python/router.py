@@ -823,6 +823,7 @@ class Controller:
             )
             if index is None:
                 raise ControlRejected("unknown_account")
+            await self.reconcile_active_items()
             if self.active_threads or self.active_items or self.server_requests:
                 raise ControlRejected("busy")
             options = self.pool.options(label) if self.pool else {}
@@ -1260,7 +1261,7 @@ class Controller:
         return generation == self.user_generation and self.attached()
 
     async def reconcile_active_items(self):
-        """Retire missed completion events only from matching, full native history."""
+        """Reconcile finished actions and native background jobs at idle boundaries."""
         owners = dict(self.active_item_threads)
         revision = self.item_revision
         for thread in set(owners.values()):
@@ -1269,6 +1270,10 @@ class Controller:
                 for item, owner in owners.items()
                 if owner == thread and item in self.active_items
             }
+            if not pending:
+                continue
+            await self.reconcile_background_activity(thread, pending, revision)
+            pending &= self.active_items
             if not pending:
                 continue
             cursor = None
@@ -1321,8 +1326,6 @@ class Controller:
                 if not pending or not cursor or cursor in visited:
                     break
                 visited.add(cursor)
-            if pending:
-                await self.reconcile_terminal_activity(thread, pending, revision)
 
     def backend_disconnected(self):
         check = getattr(self.backend, "disconnected", None)
@@ -1350,45 +1353,40 @@ class Controller:
             "disconnected": self.backend_disconnected(),
         }
 
-    async def reconcile_terminal_activity(self, thread, pending, revision):
-        """A native idle boundary can retire orphaned lifecycle notifications.
+    async def reconcile_background_activity(self, thread, pending, revision):
+        """After a turn ends, known background terminals need not block login.
 
-        Require the current terminal turn with its full action history, plus an
-        authoritative status read from this backend. Background terminals may
-        remain alive; changing model credentials does not restart those jobs.
+        These jobs remain alive in the same backend. Unknown tools and pending
+        approvals still block recovery; a terminal turn alone cannot clear them.
         """
         turn_id = self.turn_ids.get(thread)
         generation = self.user_generation
         if not turn_id or self.server_requests:
             return
         try:
-            result = await self.backend.call(
-                "thread/turns/list",
-                {
-                    "threadId": thread,
-                    "limit": 1,
-                    "sortDirection": "desc",
-                    "itemsView": "full",
-                },
-                timeout=15,
-            )
-            turn = (result.get("data") or [{}])[0]
-            if (
-                turn.get("id") != turn_id
-                or turn.get("status") not in {"completed", "failed", "interrupted"}
-                or turn.get("itemsView") != "full"
-            ):
+            turn = await self.latest(thread) or {}
+            if turn.get("id") != turn_id or turn.get("status") not in {
+                "completed",
+                "failed",
+                "interrupted",
+            }:
                 return
-            tools = [
-                item
-                for item in turn.get("items", [])
-                if item.get("type")
-                in {"commandExecution", "mcpToolCall", "fileChange", "dynamicToolCall"}
-            ]
-            if any(
-                item.get("status") not in {"completed", "failed", "declined"}
-                for item in tools
-            ):
+            background = set()
+            cursor = None
+            visited = set()
+            for _ in range(8):
+                params = {"threadId": thread, "limit": 100}
+                if cursor:
+                    params["cursor"] = cursor
+                result = await self.backend.call(
+                    "thread/backgroundTerminals/list", params, timeout=15
+                )
+                background.update(item.get("itemId") for item in result.get("data", []))
+                cursor = result.get("nextCursor")
+                if not cursor or cursor in visited or pending <= background:
+                    break
+                visited.add(cursor)
+            if not pending & background:
                 return
             info = await self.backend.call(
                 "thread/read", {"threadId": thread}, timeout=15
@@ -1407,7 +1405,7 @@ class Controller:
             return
         cleared = {
             item
-            for item in pending
+            for item in pending & background
             if self.active_item_threads.get(item) == thread
             and item in self.active_items
         }
@@ -1419,7 +1417,7 @@ class Controller:
             self.persist(thread, active_items=bool(self.active_items))
             if self.pool:
                 self.pool.record(
-                    "terminal_activity_reconciled",
+                    "background_activity_reconciled",
                     count=len(cleared),
                     thread=thread,
                     turn=turn_id,
