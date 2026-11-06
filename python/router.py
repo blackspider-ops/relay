@@ -24,7 +24,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -93,6 +93,17 @@ def clean_env(home: Path) -> dict:
         env.pop(key, None)
     env["CODEX_HOME"] = str(home)
     return env
+
+
+def rejected_failure_kind(payload):
+    if payload.get("code") == -32001:
+        return "transient"
+    if (
+        payload.get("code") in {-32000, -32603}
+        and failure_kind("other", payload.get("message")) == "auth"
+    ):
+        return "auth"
+    return None
 
 
 def codex_path() -> str:
@@ -192,6 +203,9 @@ class RPC:
         self.handlers = set()
         self.reader = asyncio.create_task(self.read_loop())
         self.startup_guard = None
+
+    def disconnected(self):
+        return self.proc.returncode is not None or self.reader.done()
 
     @classmethod
     async def start(
@@ -330,7 +344,7 @@ class Account:
         self.lock = asyncio.Lock()
 
     async def start(self):
-        if self.rpc and self.rpc.proc.returncode is not None:
+        if self.rpc and self.rpc.disconnected():
             await self.rpc.close()
             self.rpc = None
         if not self.rpc:
@@ -384,6 +398,7 @@ class Account:
     async def close(self):
         if self.rpc:
             await self.rpc.close()
+            self.rpc = None
 
 
 class Controller:
@@ -433,9 +448,11 @@ class Controller:
         self.turn_ids = {}
         self.recovery_jobs = {}
         self.pending_intents = {}
+        self.rejected_turns = {}
         self.active_items = set()
         self.active_item_threads = {}
         self.item_revision = 0
+        self.auth_account = None
         self.backend_factory = None
         self.restart_lock = asyncio.Lock()
         self.restart_task = None
@@ -675,6 +692,7 @@ class Controller:
                         model=next((self.model_for(t) for t in self.last_turn), None),
                         paused=self.paused,
                         background=self.background,
+                        activity=self.activity_snapshot(),
                     )
                     last_heartbeat = now
                 new_revision = self.pool.revision()
@@ -743,7 +761,7 @@ class Controller:
                     pass
             if now - last_watch >= self.preferences["watchdog_interval"]:
                 last_watch = now
-                if self.backend.proc.returncode is not None and self.backend_factory:
+                if self.backend_disconnected() and self.backend_factory:
                     if not self.restart_task or self.restart_task.done():
                         self.restart_task = asyncio.create_task(self.restart_backend())
                 elif self.active_threads:
@@ -859,20 +877,24 @@ class Controller:
 
     async def restart_backend(self):
         async with self.restart_lock:
-            if self.backend.proc.returncode is None:
+            if not self.backend_disconnected():
                 return
             self.note("restarting")
             in_flight = bool(self.active_items or self.server_requests)
             old = self.backend
+            old_auth_account = self.auth_account
             candidate = None
             try:
                 candidate = await self.backend_factory()
-                candidate.handler = self.event
+                candidate.handler = lambda message: self.event(
+                    message, origin=candidate
+                )
                 await candidate.initialize()
                 self.backend = candidate
                 await self.login(self.index)
             except Exception:
                 self.backend = old
+                self.auth_account = old_auth_account
                 if candidate:
                     await candidate.close()
                 self.note("backend_restart_failed", reason="startup_or_login_failed")
@@ -966,9 +988,17 @@ class Controller:
                     )
                 ):
                     raise ControlRejected("account_unavailable")
-            await self.backend.call(
-                "account/login/start", {"type": "chatgptAuthTokens", **credentials}
-            )
+            # Native refresh callbacks can arrive before the login response.
+            # Bind them to the credentials being installed, not the old index.
+            previous_binding = self.auth_account
+            self.auth_account = self.accounts[index]
+            try:
+                await self.backend.call(
+                    "account/login/start", {"type": "chatgptAuthTokens", **credentials}
+                )
+            except RemoteError:
+                self.auth_account = previous_binding
+                raise
             self.index = index
             # Acceptance of token syntax alone isn't a verified, usable login.
             result = await self.backend.call("account/read", {"refreshToken": False})
@@ -984,25 +1014,34 @@ class Controller:
             except Exception:
                 pass
 
-    async def event(self, message):
+    async def event(self, message, *, origin=None):
+        if origin is not None and origin is not self.backend:
+            return
         method, params = message.get("method"), message.get("params", {})
         if method == "account/chatgptAuthTokens/refresh":
+            account = self.auth_account or self.account
+            transport = self.backend
             try:
                 # Never return another identity in response to a refresh request.
-                credentials = await self.account.credentials(refresh=True)
+                credentials = await account.credentials(refresh=True)
                 previous = params.get("previousAccountId")
                 if previous and previous != credentials["chatgptAccountId"]:
                     raise RouterError(
                         "Refresh account mismatch; re-enroll the account."
                     )
-                await self.backend.send({"id": message["id"], "result": credentials})
+                if transport is not self.backend:
+                    return
+                await transport.send({"id": message["id"], "result": credentials})
             except (RouterError, asyncio.TimeoutError):
-                await self.backend.send(
+                if transport is not self.backend:
+                    return
+                self.note("auth_refresh_failed", account=account.label)
+                await transport.send(
                     {
                         "id": message["id"],
                         "error": {
                             "code": -32000,
-                            "message": "Account requires sign-in.",
+                            "message": "Account credentials could not be refreshed. Relay will retry after this turn ends.",
                         },
                     }
                 )
@@ -1024,6 +1063,7 @@ class Controller:
             if self.pool and thread.get("id"):
                 self.pool.claim(thread["id"])
         if method == "turn/started":
+            self.rejected_turns.pop(params["threadId"], None)
             self.active_threads.add(params["threadId"])
             self.turn_ids[params["threadId"]] = params.get("turn", {}).get("id")
             if params["threadId"] in self.pending_intents:
@@ -1034,6 +1074,7 @@ class Controller:
                 accepted=True,
                 turn=params.get("turn", {}).get("id"),
                 state="working",
+                rejected=False,
             )
         elif method == "item/started" and params.get("item", {}).get("type") in {
             "commandExecution",
@@ -1206,7 +1247,9 @@ class Controller:
                         await self.reconcile(thread)
                 if time.monotonic() - began > self.preferences["idle_warning_after"]:
                     self.note(
-                        "waiting_for_activity", reason="actions_or_approvals_not_idle"
+                        "waiting_for_activity",
+                        reason="actions_or_approvals_not_idle",
+                        activity=self.activity_snapshot(),
                     )
             if self.paused:
                 self.wake.clear()
@@ -1278,6 +1321,110 @@ class Controller:
                 if not pending or not cursor or cursor in visited:
                     break
                 visited.add(cursor)
+            if pending:
+                await self.reconcile_terminal_activity(thread, pending, revision)
+
+    def backend_disconnected(self):
+        check = getattr(self.backend, "disconnected", None)
+        return (
+            check()
+            if check
+            else getattr(getattr(self.backend, "proc", None), "returncode", None)
+            is not None
+        )
+
+    def activity_snapshot(self):
+        """Private diagnostic metadata; never tool arguments or credentials."""
+        return {
+            "threads": sorted(self.active_threads),
+            "items": sorted(self.active_items),
+            "owners": dict(self.active_item_threads),
+            "requests": sorted(
+                {
+                    m.get("method", "unknown")
+                    for m in self.pending_server_requests.values()
+                }
+            ),
+            "request_count": len(self.server_requests),
+            "paused": self.paused,
+            "disconnected": self.backend_disconnected(),
+        }
+
+    async def reconcile_terminal_activity(self, thread, pending, revision):
+        """A native idle boundary can retire orphaned lifecycle notifications.
+
+        Require the current terminal turn with its full action history, plus an
+        authoritative status read from this backend. Background terminals may
+        remain alive; changing model credentials does not restart those jobs.
+        """
+        turn_id = self.turn_ids.get(thread)
+        generation = self.user_generation
+        if not turn_id or self.server_requests:
+            return
+        try:
+            result = await self.backend.call(
+                "thread/turns/list",
+                {
+                    "threadId": thread,
+                    "limit": 1,
+                    "sortDirection": "desc",
+                    "itemsView": "full",
+                },
+                timeout=15,
+            )
+            turn = (result.get("data") or [{}])[0]
+            if (
+                turn.get("id") != turn_id
+                or turn.get("status") not in {"completed", "failed", "interrupted"}
+                or turn.get("itemsView") != "full"
+            ):
+                return
+            tools = [
+                item
+                for item in turn.get("items", [])
+                if item.get("type")
+                in {"commandExecution", "mcpToolCall", "fileChange", "dynamicToolCall"}
+            ]
+            if any(
+                item.get("status") not in {"completed", "failed", "declined"}
+                for item in tools
+            ):
+                return
+            info = await self.backend.call(
+                "thread/read", {"threadId": thread}, timeout=15
+            )
+        except (RouterError, asyncio.TimeoutError):
+            return
+        if (
+            revision != self.item_revision
+            or generation != self.user_generation
+            or self.turn_ids.get(thread) != turn_id
+            or self.server_requests
+            or info.get("thread", {}).get("status", {}).get("type")
+            not in {"idle", "systemError"}
+            or info.get("thread", {}).get("canAcceptDirectInput") is False
+        ):
+            return
+        cleared = {
+            item
+            for item in pending
+            if self.active_item_threads.get(item) == thread
+            and item in self.active_items
+        }
+        for item in cleared:
+            self.active_items.discard(item)
+            self.active_item_threads.pop(item, None)
+        if cleared:
+            self.active_threads.discard(thread)
+            self.persist(thread, active_items=bool(self.active_items))
+            if self.pool:
+                self.pool.record(
+                    "terminal_activity_reconciled",
+                    count=len(cleared),
+                    thread=thread,
+                    turn=turn_id,
+                )
+            self.status_changed.set()
 
     async def continue_thread(self, thread, generation):
         if not self.can_continue(thread, generation):
@@ -1295,6 +1442,19 @@ class Controller:
                 params[key] = self.thread_settings[thread][key]
         params["clientUserMessageId"] = str(uuid.uuid4())
         baseline = self.turn_ids.get(thread) or "__unknown_before_submission__"
+        rejected = self.rejected_turns.get(thread)
+        if rejected:
+            baseline = rejected["baseline"]
+            try:
+                latest = await self.latest(thread)
+            except (RouterError, asyncio.TimeoutError):
+                self.hold_for_review(thread, "rejected_request_history_unavailable")
+                return
+            observed = (latest or {}).get("id") or "__unknown_before_submission__"
+            if observed != baseline:
+                self.hold_for_review(thread, "rejected_request_history_changed")
+                return
+            params = dict(rejected["params"])
         try:
             while True:
                 async with self.login_lock:
@@ -1312,6 +1472,7 @@ class Controller:
                             accepted=False,
                             state="submitting",
                             baseline=baseline,
+                            rejected=bool(rejected),
                         )
                         result = await self.backend.call("turn/start", params)
                         break
@@ -1319,6 +1480,7 @@ class Controller:
                     return
             turn = result.get("turn", {})
             if turn.get("id"):
+                self.rejected_turns.pop(thread, None)
                 self.turn_ids[thread] = turn["id"]
                 self.pending_intents[thread]["accepted"] = True
                 self.persist(
@@ -1326,18 +1488,35 @@ class Controller:
                     accepted=True,
                     turn=turn["id"],
                     state=turn.get("status", "working"),
+                    rejected=False,
                 )
         except RemoteError as error:
-            if error.payload.get("code") == -32001:
-                return await self.recover(thread, generation, "transient")
+            kind = rejected_failure_kind(error.payload)
+            if kind:
+                if self.pending_intents.get(thread, {}).get("accepted"):
+                    return await self.uncertain(thread, generation, baseline)
+                self.remember_rejected(thread, params, baseline)
+                return await self.recover(thread, generation, kind)
             raise
         except (RouterError, asyncio.TimeoutError):
             return await self.uncertain(thread, generation, baseline)
         self.report(f"Continued the saved thread with {self.account_name()}.")
 
+    def remember_rejected(self, thread, params, baseline):
+        # Only explicit pre-acceptance rejections qualify. Keep the original
+        # input in memory; a worker restart requires resubmission, not a guess.
+        self.rejected_turns[thread] = {
+            "params": dict(params),
+            "baseline": baseline or "__unknown_before_submission__",
+        }
+        self.persist(thread, rejected=True)
+
     async def restore_recovery(self, thread, persisted):
         """Honor an accepted retry's original deadline after a process restart."""
         generation = self.user_generation
+        if persisted.get("rejected"):
+            self.hold_for_review(thread, "rejected_request_requires_resubmission")
+            return
         if persisted.get("review_required"):
             self.hold_for_review(
                 thread, persisted.get("review_reason") or "review_required"
@@ -1703,6 +1882,7 @@ class Controller:
                 self.fallback_tried.pop(message["params"]["threadId"], None)
             self.status_changed.set()
             if method == "turn/start":
+                self.rejected_turns.pop(message["params"]["threadId"], None)
                 self.clear_review(message["params"]["threadId"])
                 self.last_turn[message["params"]["threadId"]] = message["params"]
                 self.merge_settings(message["params"]["threadId"], message["params"])
@@ -1768,6 +1948,7 @@ class Controller:
                         accepted=False,
                         baseline=self.turn_ids.get(thread),
                         state="submitting",
+                        rejected=False,
                     )
                 async with guard:
                     result = await self.backend.call(
@@ -1834,13 +2015,22 @@ class Controller:
             await self.emit({"id": request_id, "error": error.payload})
             # Ingress overload rejects a turn before a turn/completed event
             # exists. Its documented code is explicit, not message matching.
-            if method == "turn/start" and error.payload.get("code") == -32001:
+            kind = rejected_failure_kind(error.payload)
+            if method == "turn/start" and kind:
                 if self.recovery and not self.recovery.done():
                     self.recovery.cancel()
                 thread = message["params"]["threadId"]
-                self.recovery = asyncio.create_task(
-                    self.recover(thread, self.user_generation, "transient")
-                )
+                intent = self.pending_intents.get(thread, {})
+                baseline = intent.get("baseline", "__unknown_before_submission__")
+                if intent.get("accepted"):
+                    self.recovery = asyncio.create_task(
+                        self.uncertain(thread, self.user_generation, baseline)
+                    )
+                else:
+                    self.remember_rejected(thread, message["params"], baseline)
+                    self.recovery = asyncio.create_task(
+                        self.recover(thread, self.user_generation, kind)
+                    )
         except (RouterError, asyncio.TimeoutError):
             await self.emit(
                 {

@@ -1,5 +1,16 @@
 # Changes
 
+## 0.7.4
+
+- Reconcile orphaned tool activity at a verified native idle boundary so a finished, failed turn can switch accounts.
+- Keep recovery blocked for active native work, incomplete tool history, approvals, changed turns, and user pauses.
+- Bind login refresh callbacks to the account being installed, including callbacks arriving before login completes.
+- Route the native auth-refresh failure into the authentication retry schedule.
+- Retry explicitly rejected prompts with their original input only after checking that no turn was accepted; retain review holds after a worker restart.
+- Reload persisted credentials before a forced refresh and ignore callbacks from a replaced backend.
+- Detect a disconnected backend channel even when its process is still alive.
+- Save private activity diagnostics and update runtime metadata when restarting a worker.
+
 ## 0.7.3
 
 - Restore terminal modes after a disconnected frontend so mouse movements cannot leak into shell input.

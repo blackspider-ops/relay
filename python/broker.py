@@ -225,6 +225,11 @@ async def serve(state, binary):
                                     ):
                                         value = candidate
                                 if value is None:
+                                    if request.get("refresh"):
+                                        # A retained native manager can hold a refresh
+                                        # grant rotated by another process. Reload the
+                                        # Keychain under this account's shared lock.
+                                        await account.close()
                                     await account.start()
                                     result = await account.rpc.call(
                                         "account/read",

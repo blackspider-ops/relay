@@ -376,7 +376,12 @@ def restart(state, prefix):
     spec = json.loads(path.read_text())
     if not Path(spec["cwd"]).is_dir():
         raise RouterError("The project folder no longer exists")
-    spec.update(state="starting", background_launch=True, foreground_owner=None)
+    spec.update(
+        state="starting",
+        background_launch=True,
+        foreground_owner=None,
+        relay_runtime=str(Path(__file__).parent.resolve()),
+    )
     spec.pop("last_error", None)
     atomic_json(path, spec)
     process = spawn(
@@ -534,7 +539,7 @@ async def _serve(state, ident, binary):
     controller.retry_interval = controller.preferences["retry_interval"]
     controller.retry_attempts = controller.preferences["retry_attempts"]
     controller.interval = controller.preferences["unknown_reset_interval"]
-    backend.handler = controller.event
+    backend.handler = lambda message: controller.event(message, origin=backend)
     heartbeat = asyncio.create_task(controller.maintain())
     connection = root / (ident + ".connection.json")
     try:
@@ -717,7 +722,7 @@ async def _serve(state, ident, binary):
                     if not persisted.get("accepted")
                     else None,
                 )
-                if state_name == "completed":
+                if state_name == "completed" and not persisted.get("rejected"):
                     controller.persist(
                         thread_id,
                         state="completed",
@@ -729,6 +734,7 @@ async def _serve(state, ident, binary):
                     )
                 elif (
                     persisted.get("review_required")
+                    or persisted.get("rejected")
                     or persisted.get("active_items")
                     or not persisted.get("accepted")
                 ):

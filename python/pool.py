@@ -545,6 +545,13 @@ CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model.
 
 
 def failure_kind(info, message=None):
+    if (
+        info in (None, "other", "unauthorized")
+        and isinstance(message, str)
+        and message.strip().removeprefix("■").strip().lower()
+        == "auth refresh request failed: code=-32000"
+    ):
+        return "auth"
     if info == "policyCapacityUnavailable":
         return "capacity"
     # Older/generic error envelopes can omit the enum. Match only the known

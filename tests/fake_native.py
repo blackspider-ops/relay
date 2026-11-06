@@ -263,6 +263,20 @@ for raw in sys.stdin:
                         "params": {"threadId": thread, "item": tool},
                     }
                 )
+            if count <= fault.get("orphaned_activity_turns", 0):
+                send(
+                    {
+                        "method": "item/started",
+                        "params": {
+                            "threadId": thread,
+                            "item": {
+                                "id": "orphaned-" + turn,
+                                "type": "commandExecution",
+                                "status": "inProgress",
+                            },
+                        },
+                    }
+                )
             if fault.get("external"):
                 send(
                     {

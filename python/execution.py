@@ -350,7 +350,7 @@ async def _run(args, state, binary):
         controller.launch_overrides = overrides
         controller.client = output
         output.controller = controller
-        backend.handler = controller.event
+        backend.handler = lambda message: controller.event(message, origin=backend)
         init = await backend.initialize()
         heartbeat = asyncio.create_task(controller.maintain())
         model = values.get("--model")

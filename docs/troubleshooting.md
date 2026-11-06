@@ -51,12 +51,20 @@ visible. Use Restart for a stopped worker rather than sending it live controls.
 
 **A usage-limit panel remains open and Relay says “waiting for activity.”**
 
-Update Relay if you are using a version older than 0.7.3. A missed tool-completion
-notification could leave a finished tool marked as active. Relay now checks full
-native history for the matching tool before continuing account recovery. It keeps
+Update Relay if you are using a version older than 0.7.4. Missed or orphaned
+tool notifications could leave a finished turn marked as active. Relay checks
+full native history and the current backend's idle status before clearing stale
+activity. The usage panel does not need to be clicked. It keeps
 waiting when work is still running or completion cannot be verified; approvals
 and paused recovery still need attention. Existing workers retain the code they
 started with, so an update takes effect after that worker is relaunched.
+
+**Codex says “auth refresh request failed: code=-32000.”**
+
+Relay retries authentication on its normal retry schedule, then tries another
+available account. If Codex reports that a refresh token was revoked, sign in
+again with `relay account reauth LABEL`. Switch any sessions using that account
+first. A revoked login cannot be repaired by retrying the same token.
 
 **Tab completion is missing.**
 
