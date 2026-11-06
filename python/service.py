@@ -211,10 +211,17 @@ async def attach(
                     pool.close()
                 message = (detail.get("state"), detail.get("next_wake"))
                 if message != last_message and message[1]:
+                    signin = detail.get("sign_in_required", [])
                     print(
-                        "Waiting until "
+                        (
+                            "Sign-in required for "
+                            + ", ".join(signin)
+                            + ". Run relay account reauth LABEL. Next availability check: "
+                            if signin
+                            else "Waiting until "
+                        )
                         + time.strftime("%m-%d %H:%M:%S", time.localtime(message[1]))
-                        + " for account allowance.",
+                        + ("." if signin else " for account availability."),
                         flush=True,
                     )
                 last_message = message
@@ -589,7 +596,7 @@ async def _serve(state, ident, binary):
                 except (RouterError, asyncio.TimeoutError):
                     await controller.mark(index, None, "unavailable")
             else:
-                pool.touch(state="waiting_for_reset", next_wake=deadline)
+                controller.waiting_accounts(deadline)
                 await controller.wait_until(deadline, controller.user_generation)
         if controller.stopping.is_set():
             latest = json.loads(spec_path.read_text())
@@ -744,7 +751,11 @@ async def _serve(state, ident, binary):
                         reason="worker_restarted_during_uncertain_action",
                         thread=thread_id,
                     )
-                elif persisted.get("state") in {"retry_scheduled", "waiting_for_reset"}:
+                elif persisted.get("state") in {
+                    "retry_scheduled",
+                    "waiting_for_reset",
+                    "waiting_for_accounts",
+                }:
                     controller.recovery = asyncio.create_task(
                         controller.restore_recovery(thread_id, persisted)
                     )

@@ -20,11 +20,16 @@ import sys
 import time
 import uuid
 
+# Workers and management commands also import router. Keep one module identity
+# when this file is executed directly, especially for shared exception classes.
+if __name__ == "__main__":
+    sys.modules["router"] = sys.modules[__name__]
+
 from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.7.5"
+VERSION = "0.7.6"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -45,7 +50,15 @@ class RouterError(Exception):
     """A message safe to display; never include a server error or credential."""
 
 
+class SignInRequired(RouterError):
+    def __init__(self):
+        super().__init__(
+            "This account needs a fresh sign-in. Run relay account reauth LABEL."
+        )
+
+
 CONTROL_REJECTIONS = {
+    "sign_in_required": "That account needs a fresh sign-in. Run relay account reauth with its email or label, then switch again.",
     "unknown_account": "That account is no longer enrolled. Check relay list.",
     "busy": "Session is busy; switch after its current work and approvals finish.",
     "account_unavailable": "Account is disabled, under maintenance, or unavailable for this model.",
@@ -721,6 +734,8 @@ class Controller:
                         reason = (
                             error.reason if isinstance(error, ControlRejected) else None
                         )
+                        if isinstance(error, SignInRequired):
+                            reason = "sign_in_required"
                         self.pool.ack(command, "failed", reason=reason)
                         self.pool.record("control_failed", operation=op, reason=reason)
             if self.lifecycle_check:
@@ -823,6 +838,11 @@ class Controller:
             )
             if index is None:
                 raise ControlRejected("unknown_account")
+            if self.pool:
+                from account_auth import required
+
+                if required(account_home(self.pool.state, label)):
+                    raise ControlRejected("sign_in_required")
             await self.reconcile_active_items()
             if self.active_threads or self.active_items or self.server_requests:
                 raise ControlRejected("busy")
@@ -850,6 +870,14 @@ class Controller:
                 if self.pool:
                     self.pool.release_reservation()
             self.note("switched", to=label)
+            if thread and self.recovery and not self.recovery.done():
+                previous = self.recovery
+                self.user_generation += 1
+                previous.cancel()
+                await asyncio.gather(previous, return_exceptions=True)
+                self.recovery = asyncio.create_task(
+                    self.continue_thread(thread, self.user_generation)
+                )
         elif op == "retry":
             self.paused = False
             if thread:
@@ -1592,6 +1620,11 @@ class Controller:
         order = sorted(range(len(self.accounts)), key=score)
         deadlines = []
         for index in order:
+            if self.pool:
+                from account_auth import required
+
+                if required(account_home(self.pool.state, self.accounts[index].label)):
+                    continue
             deadline = self.deadline(index, model)
             if deadline > self.clock():
                 deadlines.append(deadline)
@@ -1639,6 +1672,24 @@ class Controller:
             except (RouterError, asyncio.TimeoutError):
                 deadlines.append(await self.mark(index, model, "unavailable"))
         return None, min(deadlines, default=self.clock() + self.interval)
+
+    def waiting_accounts(self, deadline):
+        from account_auth import required
+
+        signin = (
+            [
+                a.label
+                for a in self.accounts
+                if required(account_home(self.pool.state, a.label))
+            ]
+            if self.pool
+            else []
+        )
+        state = "waiting_for_accounts" if signin else "waiting_for_reset"
+        fields = {"next_wake": deadline, "sign_in_required": signin}
+        if self.pool:
+            self.pool.touch(state=state, **fields)
+        return state, fields
 
     async def recover(self, thread, generation, kind="quota"):
         if _recovery_active.get() is asyncio.current_task():
@@ -1782,16 +1833,22 @@ class Controller:
                         await self.mark(index, model, "unavailable")
                         continue
                 self.report(
-                    f"All accounts unavailable. Sleeping until {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(deadline))}; no usage requests before then."
+                    f"All accounts unavailable. Next availability check: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(deadline))}."
                 )
-                self.note("waiting_for_reset", thread=thread, next_wake=deadline)
+                state, fields = self.waiting_accounts(deadline)
+                if fields["sign_in_required"]:
+                    self.report(
+                        "Sign in again with relay account reauth for: "
+                        + ", ".join(fields["sign_in_required"])
+                    )
+                self.note(state, thread=thread, **fields)
                 self.persist(
                     thread,
                     generation=generation,
                     kind=kind,
                     next_wake=deadline,
                     account_label=self.account.label,
-                    state="waiting_for_reset",
+                    state=state,
                 )
                 await self.wait_until(max(self.clock() + 1, deadline), generation)
         except (asyncio.CancelledError, RecoveryTransition):
@@ -2260,6 +2317,9 @@ def add_account(args, state, binary):
             {"email": credentials["email"], "identity": identity},
         )
     pool = Pool(state)
+    from account_auth import clear
+
+    clear(home)
     if old_identity != identity:
         pool.reset_identity(args.label)
     else:

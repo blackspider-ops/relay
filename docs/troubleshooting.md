@@ -67,6 +67,20 @@ available account. If Codex reports that a refresh token was revoked, sign in
 again with `relay account reauth LABEL`. Switch any sessions using that account
 first. A revoked login cannot be repaired by retrying the same token.
 
+**An account shows allowance remaining but switching to it fails.**
+
+Allowance and login health are separate. With Relay 0.7.6 or newer, a login that
+Codex reports as expired or revoked is labelled “Sign-in required” in the menu
+and dashboard. Its percentages are the last successful allowance reading. Copy
+its sign-in command from the account menu or run `relay account reauth LABEL`.
+Completing sign-in wakes waiting recovery without spending a usage reset.
+
+**The menu displays a Python traceback.**
+
+Update to Relay 0.7.6 or newer. Earlier command launches could load the main
+module twice, causing expected management errors to bypass their normal handler.
+The menu now shows a short failure message and authentication-specific guidance.
+
 **Tab completion is missing.**
 
 Load `source <(relay completion zsh)` after `compinit`, or use

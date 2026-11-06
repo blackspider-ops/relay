@@ -23,6 +23,12 @@ PROTOCOL_VERSION = 1
 SOURCE_REVISION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
+class CoordinatorError(RuntimeError):
+    def __init__(self, reason=None):
+        super().__init__("Credential operation unavailable")
+        self.reason = reason
+
+
 def paths(state):
     # macOS Unix socket paths have a short length limit.
     import hashlib
@@ -51,7 +57,7 @@ async def exchange(state, request, timeout=60):
             await writer.drain()
             response = json.loads(await reader.readline())
             if not response.get("ok"):
-                raise RuntimeError("Credential operation unavailable")
+                raise CoordinatorError(response.get("reason"))
             return response.get("result")
         finally:
             writer.close()
@@ -106,13 +112,19 @@ class ClientAccount:
         self.label, self.home, self.binary, self.pool = label, home, binary, pool
 
     async def call(self, op, **params):
-        from router import RouterError
+        from router import RouterError, SignInRequired
 
         try:
             await ensure(self.pool.state, self.binary)
             return await exchange(
                 self.pool.state, {"op": op, "label": self.label, **params}
             )
+        except CoordinatorError as error:
+            if error.reason == "sign_in_required":
+                raise SignInRequired() from None
+            raise RouterError(
+                "Account coordinator could not complete this operation. Check relay doctor."
+            ) from None
         except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
             raise RouterError(
                 "Account coordinator could not complete this operation. Check doctor or reauthenticate this account."
@@ -134,7 +146,15 @@ class ClientAccount:
 
 
 async def serve(state, binary):
-    from router import Account, account_home, labels, read_keychain
+    from router import (
+        Account,
+        RemoteError,
+        SignInRequired,
+        account_home,
+        labels,
+        read_keychain,
+    )
+    import account_auth
 
     socket, meta = paths(state)
     async with file_lock(state / "broker-owner.lock"):
@@ -153,6 +173,8 @@ async def serve(state, binary):
         async def handle(reader, writer):
             nonlocal last_used
             response = {"ok": False}
+            account = None
+            stamp = None
             try:
                 raw = await asyncio.wait_for(reader.readline(), 5)
                 request = json.loads(raw)
@@ -205,6 +227,8 @@ async def serve(state, binary):
                             Account(label, account_home(state, label), binary, pool),
                         )
                         stamps[label] = stamp
+                        if op != "invalidate" and account_auth.required(account.home):
+                            raise SignInRequired()
                         async with file_lock(account.home / "credential.lock"):
                             if op == "credentials":
                                 value = None
@@ -236,7 +260,7 @@ async def serve(state, binary):
                                         {"refreshToken": bool(request.get("refresh"))},
                                     )
                                     if not result.get("account"):
-                                        raise ValueError()
+                                        raise SignInRequired()
                                     value = await asyncio.to_thread(
                                         read_keychain, account.home
                                     )
@@ -263,6 +287,19 @@ async def serve(state, binary):
                             else:
                                 raise ValueError()
                         response = {"ok": True, "result": value}
+            except SignInRequired:
+                if account is not None and not account_auth.required(account.home):
+                    account_auth.mark_required(account.home, enrollment=stamp)
+                    pool.signal("accounts")
+                    pool.signal()
+                response = {"ok": False, "reason": "sign_in_required"}
+            except RemoteError as error:
+                response = {"ok": False}
+                if account is not None and account_auth.permanent(error.payload):
+                    account_auth.mark_required(account.home, enrollment=stamp)
+                    pool.signal("accounts")
+                    pool.signal()
+                    response["reason"] = "sign_in_required"
             except (Exception, asyncio.CancelledError):
                 response = {"ok": False}
             finally:

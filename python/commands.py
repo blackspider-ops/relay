@@ -78,6 +78,7 @@ def remaining_percent(window):
 def snapshot(state, include_inactive=False):
     from router import labels, VERSION
     import resets
+    import account_auth
 
     pool = Pool(state)
     try:
@@ -102,6 +103,9 @@ def snapshot(state, include_inactive=False):
                     "name": options.get("name") or identity.get("email") or label,
                     "email": identity.get("email"),
                     "enabled": options.get("enabled", True),
+                    "sign_in_required": account_auth.required(
+                        state / "accounts" / label
+                    ),
                     "priority": options.get("priority", 0),
                     "max_sessions": options.get("max_sessions", 0),
                     "models": options.get("models", []),
@@ -203,7 +207,9 @@ def render(value):
             + (" [" + account["id"] + "]" if account["name"] != account["id"] else "")
         )[:38]
         state = (
-            "maintenance"
+            "sign-in needed"
+            if account.get("sign_in_required")
+            else "maintenance"
             if account["maintenance"]
             else "enabled"
             if account["enabled"]

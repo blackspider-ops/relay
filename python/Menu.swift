@@ -190,7 +190,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func render() {
         let sessions = current["sessions"] as? [[String: Any]] ?? []
         let accounts = current["accounts"] as? [[String: Any]] ?? []
-        let attention = message != nil || actionFailed || sessions.contains { ($0["state"] as? String) == "needs_attention" }
+        let attention = message != nil || actionFailed || sessions.contains { ($0["state"] as? String) == "needs_attention" } || accounts.contains { $0["sign_in_required"] as? Bool ?? false }
         updateIcon(attention: attention)
         item.button?.toolTip = "Relay · \(sessions.count) sessions · \(accounts.count) accounts"
         let menu = makeMenu()
@@ -223,10 +223,16 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let remaining = short == "?" ? "allowance unknown" : short + " left"
             let secondary = account["secondary"] as? [String: Any]
             let weekly = account["weekly_remaining"] as? String ?? (secondary?["usedPercent"] as? NSNumber).map { "\(max(0, 100 - $0.intValue))%" } ?? "?"
-            let label = (account["enabled"] as? Bool ?? true) ? "Short \(short) · Week \(weekly)" : "disabled"
+            let needsSignIn = account["sign_in_required"] as? Bool ?? false
+            let label = needsSignIn ? "Sign-in required" : (account["enabled"] as? Bool ?? true) ? "Short \(short) · Week \(weekly)" : "disabled"
             let submenu = NSMenu()
             submenu.autoenablesItems = false
             if let email = account["email"] as? String { text(email, into: submenu) }
+            if needsSignIn {
+                text("Login expired or revoked. Sign in again in Terminal.", into: submenu)
+                text("Allowance below is from the last successful check.", into: submenu)
+                action("Copy sign-in command", args: ["copy", "relay account reauth " + accountID], into: submenu)
+            }
             if !assigned.isEmpty {
                 for session in assigned {
                     let sessionName = session["name"] as? String ?? String((session["id"] as? String ?? "").prefix(10))
@@ -286,9 +292,10 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let models = account["models"] as? [String] ?? []
                     let model = session["model"] as? String
                     let modelAllowed = models.isEmpty || model == nil || models.contains(model!)
-                    let available = (account["enabled"] as? Bool ?? true) && !(account["maintenance"] as? Bool ?? false) && modelAllowed
+                    let needsSignIn = account["sign_in_required"] as? Bool ?? false
+                    let available = (account["enabled"] as? Bool ?? true) && !(account["maintenance"] as? Bool ?? false) && !needsSignIn && modelAllowed
                     let name = account["name"] as? String ?? accountID
-                    let choice = action(name + (selected ? " · Current" : available ? "" : " · unavailable"), args: ["switch", id, "--account", accountID, "--wait"], into: choices)
+                    let choice = action(name + (selected ? " · Current" : needsSignIn ? " · Sign in first" : available ? "" : " · unavailable"), args: ["switch", id, "--account", accountID, "--wait"], into: choices)
                     choice.state = selected ? .on : .off
                     choice.isEnabled = !selected && available && !actionRunning
                 }
@@ -397,11 +404,17 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let resetResult = detail.split(separator: "\n").last.map(String.init) ?? "Reset check finished. Check the account's allowance."
                 DispatchQueue.main.async {
                     self?.actionRunning = false; self?.actionFailed = failed
-                    self?.actionNotice = failed ? (detail.isEmpty ? "Action failed. Check relay events." : detail) : isReset ? resetResult : MenuController.successMessage(args)
+                    self?.actionNotice = failed ? MenuController.failureMessage(detail) : isReset ? resetResult : MenuController.successMessage(args)
                     self?.render(); self?.refreshSnapshot()
                 }
             } catch { DispatchQueue.main.async { self?.actionRunning = false; self?.actionFailed = true; self?.actionNotice = "Could not run that action."; self?.render() } }
         }
+    }
+    static func failureMessage(_ detail: String) -> String {
+        if detail.contains("Traceback (most recent call last)") {
+            return "Relay could not complete that action. Run relay doctor in Terminal."
+        }
+        return detail.split(separator: "\n").first(where: { $0.hasPrefix("relay: ") }).map(String.init) ?? "Action failed. Check relay events in Terminal."
     }
     static func successMessage(_ args: [String]) -> String {
         switch args.first {
@@ -452,6 +465,12 @@ if CommandLine.arguments.contains("--self-check") {
         return nil
     }
     let controller = MenuController()
+    controller.current = ["accounts": [["id": "revoked", "name": "Needs login", "sign_in_required": true, "short_remaining": "100%"]], "sessions": [["id": "task", "account": "other", "running": true]]]
+    let revoked = controller.makeMenu()
+    let loginHealth = revoked.items.contains { $0.title.contains("Sign-in required") } && findAction(["switch", "task", "--account", "revoked", "--wait"], in: revoked)?.isEnabled == false && findAction(["copy", "relay account reauth revoked"], in: revoked) != nil
+    let safeFailure = !MenuController.failureMessage("Traceback (most recent call last):\nPRIVATE_DETAIL").contains("PRIVATE_DETAIL") && MenuController.failureMessage("relay: That account needs sign-in.").contains("sign-in")
+    print("Revoked login clearly shown and blocked: \(loginHealth && safeFailure)")
+    if !loginHealth || !safeFailure { exit(1) }
     controller.current = ["accounts": [["id": "one", "name": "One"], ["id": "two", "name": "Two"], ["id": "off", "enabled": false]], "sessions": [["id": "live", "account": "one", "running": true], ["id": "stopped", "running": false]]]
     let controls = controller.makeMenu()
     let switchArgs = ["switch", "live", "--account", "two", "--wait"]

@@ -1,5 +1,15 @@
 # Changes
 
+## 0.7.6
+
+- Fix duplicate main-module loading so management and worker errors share the same handlers instead of escaping as tracebacks.
+- Show expired or revoked logins as “Sign-in required,” separately from cached allowance.
+- Preserve a safe authentication error through the local coordinator and manual-switch controls.
+- Skip logins known to need sign-in until their enrollment changes; transient failures retain normal retries.
+- Explain authentication blockers while waiting for accounts, and provide a sign-in command in the menu.
+- Resume waiting recovery immediately after a successful manual account switch.
+- Keep old login failures from invalidating a newly completed sign-in.
+
 ## 0.7.5
 
 - Keep changing internal activity diagnostics from redrawing an otherwise unchanged dashboard.
