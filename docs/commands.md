@@ -55,7 +55,7 @@ when Codex reports an earned reset. It is enabled only when weekly allowance is
 fully exhausted (0%) and the weekly reset is **more than 48 hours away**. Exactly
 48 hours, any weekly allowance left, or unknown weekly data keeps it disabled.
 The reason appears below the button. Choose it and confirm to use one. If the count
-is unknown, choose **Check allowance now** first. Reset availability is separate
+is unknown, reopen the menu and let its allowance check finish. Reset availability is separate
 from purchased workspace credits. Resets are never spent by automatic recovery.
 
 The equivalent terminal command is `relay account reset ACCOUNT --yes`. If a

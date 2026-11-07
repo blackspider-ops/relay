@@ -470,6 +470,7 @@ async def _serve(state, ident, binary):
         account_home,
         transport_guard,
         RouterError,
+        KeychainAccessRequired,
     )
     from broker import ClientAccount
     import settings
@@ -593,6 +594,14 @@ async def _serve(state, ident, binary):
                 try:
                     await controller.login(index)
                     break
+                except KeychainAccessRequired:
+                    pool.release_reservation()
+                    pool.touch(
+                        state="keychain_access_required", next_wake=time.time() + 60
+                    )
+                    await controller.wait_until(
+                        time.time() + 60, controller.user_generation
+                    )
                 except (RouterError, asyncio.TimeoutError):
                     await controller.mark(index, None, "unavailable")
             else:

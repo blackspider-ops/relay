@@ -81,6 +81,27 @@ Update to Relay 0.7.6 or newer. Earlier command launches could load the main
 module twice, causing expected management errors to bypass their normal handler.
 The menu now shows a short failure message and authentication-specific guidance.
 
+**A running Relay task is missing from the menu.**
+
+Update to Relay 0.7.7 or newer and restart the menu with `relay menubar`. Live
+worker metadata and recent heartbeats can restore a missing session registration
+without stopping the task. An unavailable process-start probe no longer removes
+a live registration. Positively identified dead or replaced processes are still
+removed.
+
+**Keychain keeps asking even after “Always Allow.”**
+
+Relay 0.7.7 prefers each account's native Codex helper and shares valid access
+tokens in memory across sessions. Normal credential requests no longer launch
+`security` for every session. The direct Keychain reader remains a compatibility
+fallback, with a longer approval window and a shared pause after access failures
+to avoid repeated prompts. Keychain permissions are not changed.
+
+A system prompt may still be required for a locked Keychain, a new login, or an
+unsupported native credential export. Your Mac login password belongs only in
+the macOS dialog. Completing permission approval is separate from signing into
+ChatGPT again.
+
 **Tab completion is missing.**
 
 Load `source <(relay completion zsh)` after `compinit`, or use

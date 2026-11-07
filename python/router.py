@@ -29,7 +29,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.7.6"
+VERSION = "0.7.7"
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -57,7 +57,15 @@ class SignInRequired(RouterError):
         )
 
 
+class KeychainAccessRequired(RouterError):
+    def __init__(self):
+        super().__init__(
+            "Keychain access needs your attention. Unlock the login keychain or approve the macOS access prompt, then retry."
+        )
+
+
 CONTROL_REJECTIONS = {
+    "keychain_access_required": "Approve the macOS Keychain access prompt or unlock the login keychain, then retry switching.",
     "sign_in_required": "That account needs a fresh sign-in. Run relay account reauth with its email or label, then switch again.",
     "unknown_account": "That account is no longer enrolled. Check relay list.",
     "busy": "Session is busy; switch after its current work and approvals finish.",
@@ -160,13 +168,13 @@ def read_keychain(home: Path, *, include_identity=False) -> dict:
                 "-w",
             ],
             capture_output=True,
-            timeout=20,
+            timeout=60,
         )
     except subprocess.TimeoutExpired:
-        raise RouterError(
-            "Keychain access timed out. Check for a macOS Keychain prompt."
-        ) from None
+        raise KeychainAccessRequired() from None
     if result.returncode:
+        if result.returncode in {36, 51, 128}:
+            raise KeychainAccessRequired()
         raise RouterError(
             "Cannot read this account's Keychain login. Unlock Keychain or enroll the account again."
         )
@@ -736,6 +744,8 @@ class Controller:
                         )
                         if isinstance(error, SignInRequired):
                             reason = "sign_in_required"
+                        if isinstance(error, KeychainAccessRequired):
+                            reason = "keychain_access_required"
                         self.pool.ack(command, "failed", reason=reason)
                         self.pool.record("control_failed", operation=op, reason=reason)
             if self.lifecycle_check:
@@ -1827,6 +1837,15 @@ class Controller:
                     try:
                         await self.login(index)
                         return await self.continue_thread(thread, generation)
+                    except KeychainAccessRequired:
+                        if self.pool:
+                            self.pool.release_reservation()
+                        self.note(
+                            "keychain_access_required",
+                            thread=thread,
+                            next_wake=self.clock() + 60,
+                        )
+                        await self.wait_until(self.clock() + 60, generation)
                     except (RouterError, asyncio.TimeoutError):
                         if self.pool:
                             self.pool.release_reservation()

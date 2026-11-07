@@ -1,5 +1,15 @@
 # Changes
 
+## 0.7.7
+
+- Keep live session registrations when a process-start probe is temporarily unavailable.
+- Restore missing registrations and unowned conversation claims from matching live worker metadata and a recent heartbeat, without restarting tasks.
+- Let worker heartbeats restore their own registration and retry an initially unavailable process identity.
+- Refresh allowance when opening the menu; share an in-progress check across repeated opens and remove the separate check button.
+- Obtain credentials from each account's isolated native helper and share valid tokens in memory across sessions.
+- Retain direct Keychain access as a compatibility fallback, with a longer permission window and a shared backoff after access failures.
+- Verify exported account identity against enrollment and invalidate cached credentials after sign-in changes.
+
 ## 0.7.6
 
 - Fix duplicate main-module loading so management and worker errors share the same handlers instead of escaping as tracebacks.

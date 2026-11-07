@@ -16,6 +16,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var reconnect: DispatchWorkItem?
     var stopping = false
     var snapshotInFlight = false
+    var allowanceInFlight = false
     var resetExpiry: DispatchWorkItem?
     var menuOpen = false
     let command = Bundle.main.object(forInfoDictionaryKey: "RelayCommand") as? String ?? "/usr/bin/false"
@@ -99,6 +100,36 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
+    }
+    @discardableResult func beginAllowanceCheck() -> Bool {
+        guard !allowanceInFlight, !stopping else { return false }
+        allowanceInFlight = true
+        return true
+    }
+    @discardableResult func refreshAllowanceOnOpen() -> Bool {
+        guard beginAllowanceCheck() else { return false }
+        render()
+        let proc = process(["refresh"])
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var succeeded = false
+            do {
+                try proc.run()
+                let timeout = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 90, execute: timeout)
+                proc.waitUntilExit(); timeout.cancel()
+                succeeded = proc.terminationStatus == 0
+            } catch { }
+            let finished = succeeded
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.allowanceInFlight = false
+                if !finished { self.message = "Allowance check unavailable. Showing last known values." }
+                self.refreshSnapshot(); self.render()
+            }
+        }
+        return true
     }
     static func synchronise(_ live: NSMenu, with desired: NSMenu) {
         let incoming = desired.items
@@ -208,6 +239,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
         text("Relay · \(sessions.count) sessions", into: menu)
         if let message = message { text(message, into: menu) }
+        if allowanceInFlight { text("Checking allowance…", into: menu) }
         if let notice = actionNotice {
             text(notice, into: menu)
         }
@@ -314,7 +346,6 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         action("Copy dashboard command", args: ["copy", "relay status --watch"], into: menu)
-        action("Check allowance now", args: ["refresh"], into: menu)
         let login = NSMenuItem(title: "Open at login", action: #selector(toggleLogin), keyEquivalent: ""); login.target = self
         login.isEnabled = !actionRunning
         login.state = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.relay.menu.plist") ? .on : .off
@@ -326,6 +357,7 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menuOpen = true
         render()
         refreshSnapshot()
+        refreshAllowanceOnOpen()
         updateTimes(menu)
         for entry in menu.items where entry.title == "Open at login" {
             entry.state = FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Library/LaunchAgents/local.relay.menu.plist") ? .on : .off
@@ -423,7 +455,6 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "unpause": return "Recovery resumed."
         case "retry": return "Task allowed to continue."
         case "restart": return "Session restarted."
-        case "refresh": return "Allowance check finished. See each account’s last checked time."
         case "account": return args.dropFirst().first == "disable" ? "Account disabled for future routing." : "Account enabled for routing."
         default: return "Change applied."
         }
@@ -465,6 +496,18 @@ if CommandLine.arguments.contains("--self-check") {
         return nil
     }
     let controller = MenuController()
+    let firstOpen = controller.beginAllowanceCheck()
+    let duplicateOpen = controller.beginAllowanceCheck()
+    let checkingMenu = controller.makeMenu()
+    let checkVisible = checkingMenu.items.contains { $0.title == "Checking allowance…" } && findAction(["refresh"], in: checkingMenu) == nil
+    controller.allowanceInFlight = false
+    let nextOpen = controller.beginAllowanceCheck()
+    controller.allowanceInFlight = false; controller.stopping = true
+    let stoppedCheck = controller.beginAllowanceCheck()
+    controller.stopping = false
+    let openChecks = firstOpen && !duplicateOpen && nextOpen && !stoppedCheck && checkVisible
+    print("Menu opening coalesces allowance checks and replaces refresh button: \(openChecks)")
+    if !openChecks { exit(1) }
     controller.current = ["accounts": [["id": "revoked", "name": "Needs login", "sign_in_required": true, "short_remaining": "100%"]], "sessions": [["id": "task", "account": "other", "running": true]]]
     let revoked = controller.makeMenu()
     let loginHealth = revoked.items.contains { $0.title.contains("Sign-in required") } && findAction(["switch", "task", "--account", "revoked", "--wait"], in: revoked)?.isEnabled == false && findAction(["copy", "relay account reauth revoked"], in: revoked) != nil
@@ -506,7 +549,7 @@ if CommandLine.arguments.contains("--self-check") {
     controller.current["accounts"] = originalAccounts
     controller.actionRunning = true; controller.actionNotice = "Applying change…"
     let pending = controller.makeMenu()
-    let correctPending = findAction(switchArgs, in: pending)?.isEnabled == false && findAction(["refresh"], in: pending)?.isEnabled == false && findAction(["copy", "relay attach live"], in: pending)?.isEnabled == true
+    let correctPending = findAction(switchArgs, in: pending)?.isEnabled == false && findAction(["refresh"], in: pending) == nil && findAction(["copy", "relay attach live"], in: pending)?.isEnabled == true
     controller.actionRunning = false; controller.actionNotice = "Task is busy."
     controller.current["at"] = 2000000001.0
     let retainedResult = controller.makeMenu().items.contains { $0.title == "Task is busy." }

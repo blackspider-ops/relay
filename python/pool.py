@@ -11,7 +11,6 @@ import sqlite3
 import time
 import uuid
 import subprocess
-import functools
 
 
 @contextlib.asynccontextmanager
@@ -111,6 +110,7 @@ class Pool:
             return True
 
     def prune(self, db):
+        births = {}
         for table, key in [("sessions", "id"), ("threads", "thread")]:
             for ident, pid in db.execute(f"SELECT {key},pid FROM {table}").fetchall():
                 row = db.execute(
@@ -126,15 +126,68 @@ class Pool:
                         )[0],
                     ),
                 ).fetchone()
-                birth_matches = not row or not row[0] or row[0] == process_birth(pid)
+                if pid not in births:
+                    births[pid] = process_birth(pid)
+                observed = births[pid]
+                # An unavailable ps result is not evidence of PID reuse.
+                birth_matches = (
+                    not row or not row[0] or not observed or row[0] == observed
+                )
                 if not self.alive(pid) or not birth_matches:
                     db.execute(f"DELETE FROM {table} WHERE {key}=?", (ident,))
+        self.recover_registrations(db, births)
         db.execute(
             "DELETE FROM reservations WHERE until<? OR owner NOT IN (SELECT id FROM sessions)",
             (self.clock(),),
         )
 
+    def recover_registrations(self, db, births=None):
+        """Recover live worker metadata without launching or resuming any task.
+
+        Older workers update their heartbeat even if a reader has accidentally
+        pruned their registration. Require matching independent process metadata
+        and a recent heartbeat before restoring the row and unowned claims.
+        """
+        births = {} if births is None else births
+        rows = db.execute(
+            "SELECT id,birth,seen,details FROM session_details WHERE seen>?",
+            (self.clock() - 90,),
+        ).fetchall()
+        for ident, birth, seen, raw in rows:
+            if Path(ident).name != ident or not birth:
+                continue
+            try:
+                meta = json.loads(
+                    (self.state / "services" / (ident + ".connection.json")).read_text()
+                )
+                pid = meta["pid"]
+                if not isinstance(pid, int) or pid <= 0 or meta.get("birth") != birth:
+                    continue
+                if pid not in births:
+                    births[pid] = process_birth(pid)
+                if not self.alive(pid) or births[pid] != birth:
+                    continue
+                details = json.loads(raw)
+                label = details.get("account")
+                if not isinstance(label, str):
+                    continue
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            db.execute(
+                "INSERT OR IGNORE INTO sessions VALUES(?,?,?)", (ident, pid, label)
+            )
+            threads = {t for t in (details.get("threads") or []) if isinstance(t, str)}
+            if isinstance(meta.get("thread"), str):
+                threads.add(meta["thread"])
+            for thread in threads:
+                if isinstance(thread, str):
+                    db.execute(
+                        "INSERT OR IGNORE INTO threads VALUES(?,?,?)",
+                        (thread, ident, pid),
+                    )
+
     def assign(self, label):
+        self.assigned_label = label
         with self.db() as db:
             self.prune(db)
             db.execute(
@@ -254,6 +307,11 @@ class Pool:
 
     def touch(self, **details):
         with self.db() as db:
+            if hasattr(self, "assigned_label"):
+                db.execute(
+                    "INSERT OR IGNORE INTO sessions VALUES(?,?,?)",
+                    (self.session, os.getpid(), self.assigned_label),
+                )
             row = db.execute(
                 "SELECT details FROM session_details WHERE id=?", (self.session,)
             ).fetchone()
@@ -422,6 +480,8 @@ class Pool:
             )
 
     def close(self):
+        if hasattr(self, "assigned_label"):
+            del self.assigned_label
         with self.db() as db:
             db.execute("DELETE FROM sessions WHERE id=?", (self.session,))
             db.execute("DELETE FROM threads WHERE owner=?", (self.session,))
@@ -536,9 +596,18 @@ def _birth(pid):
         return ""
 
 
-@functools.lru_cache(maxsize=1)
+_own_birth_cache = (None, "")
+
+
 def _own_birth():
-    return _birth(os.getpid())
+    global _own_birth_cache
+    pid = os.getpid()
+    if _own_birth_cache[0] != pid or not _own_birth_cache[1]:
+        value = _birth(pid)
+        if value:
+            _own_birth_cache = (pid, value)
+        return value
+    return _own_birth_cache[1]
 
 
 CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model."

@@ -29,6 +29,79 @@ class CoordinatorError(RuntimeError):
         self.reason = reason
 
 
+class CredentialCache:
+    """Share already-authorized access tokens in RAM, never in a cache file."""
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.values = {}
+
+    def put(self, label, generation, credentials):
+        part = credentials["accessToken"].split(".")[1]
+        expiry = json.loads(
+            base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+        ).get("exp", 0)
+        self.values[label] = (generation, expiry, dict(credentials))
+
+    def get(self, label, generation):
+        value = self.values.get(label)
+        if value and value[0] == generation and value[1] > self.clock() + 120:
+            return dict(value[2])
+        self.discard(label)
+        return None
+
+    def discard(self, label):
+        self.values.pop(label, None)
+
+
+async def native_credentials(account, stats=None):
+    """Prefer the signed native helper; keep direct Keychain as a fallback.
+
+    This is a legacy native endpoint, so capability failure must not pin Relay
+    to one Codex version. Exported identity must match enrollment before use.
+    """
+    from router import RemoteError, read_keychain
+
+    await account.start()
+    try:
+        status = await account.rpc.call(
+            "getAuthStatus", {"includeToken": True, "refreshToken": False}
+        )
+    except RemoteError as error:
+        if error.payload.get("code") not in {-32601, -32600}:
+            raise
+        status = {}
+    token = status.get("authToken")
+    if status.get("authMethod") in {"chatgpt", "chatgptAuthTokens"} and isinstance(
+        token, str
+    ):
+        try:
+            part = token.split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+            metadata = claims.get("https://api.openai.com/auth", {})
+            account_id = metadata.get("chatgpt_account_id")
+            enrolled = json.loads((account.home / "enrolled").read_text()).get(
+                "identity"
+            )
+            if (
+                isinstance(account_id, str)
+                and hashlib.sha256(account_id.encode()).hexdigest() == enrolled
+                and claims.get("exp", 0) > time.time() + 10
+            ):
+                if stats is not None:
+                    stats["native_exports"] += 1
+                return {
+                    "accessToken": token,
+                    "chatgptAccountId": account_id,
+                    "chatgptPlanType": metadata.get("chatgpt_plan_type"),
+                }
+        except (ValueError, TypeError, IndexError, OSError):
+            pass
+    if stats is not None:
+        stats["keychain_fallbacks"] += 1
+    return await asyncio.to_thread(read_keychain, account.home)
+
+
 def paths(state):
     # macOS Unix socket paths have a short length limit.
     import hashlib
@@ -112,16 +185,20 @@ class ClientAccount:
         self.label, self.home, self.binary, self.pool = label, home, binary, pool
 
     async def call(self, op, **params):
-        from router import RouterError, SignInRequired
+        from router import RouterError, SignInRequired, KeychainAccessRequired
 
         try:
             await ensure(self.pool.state, self.binary)
             return await exchange(
-                self.pool.state, {"op": op, "label": self.label, **params}
+                self.pool.state,
+                {"op": op, "label": self.label, **params},
+                timeout=90 if op == "credentials" else 60,
             )
         except CoordinatorError as error:
             if error.reason == "sign_in_required":
                 raise SignInRequired() from None
+            if error.reason == "keychain_access_required":
+                raise KeychainAccessRequired() from None
             raise RouterError(
                 "Account coordinator could not complete this operation. Check relay doctor."
             ) from None
@@ -150,9 +227,9 @@ async def serve(state, binary):
         Account,
         RemoteError,
         SignInRequired,
+        KeychainAccessRequired,
         account_home,
         labels,
-        read_keychain,
     )
     import account_auth
 
@@ -166,6 +243,13 @@ async def serve(state, binary):
         locks = {}
         stamps = {}
         refreshed = {}
+        credentials_cache = CredentialCache()
+        stats = {
+            "native_exports": 0,
+            "keychain_fallbacks": 0,
+            "credential_cache_hits": 0,
+        }
+        permission_failures = {}
         last_used = time.monotonic()
         network = {"at": 0, "value": None}
         stop = asyncio.Event()
@@ -190,6 +274,7 @@ async def serve(state, binary):
                             "revision": LEGACY_CLIENT_REVISION,
                             "protocol": PROTOCOL_VERSION,
                             "build": SOURCE_REVISION,
+                            "credential_reads": dict(stats),
                         },
                     }
                 elif op == "stop":
@@ -222,6 +307,10 @@ async def serve(state, binary):
                         stamp = marker.stat().st_mtime_ns
                         if label in accounts and stamps.get(label) != stamp:
                             await accounts.pop(label).close()
+                        if stamps.get(label) != stamp:
+                            credentials_cache.discard(label)
+                            permission_failures.pop(label, None)
+                            refreshed.pop(label, None)
                         account = accounts.setdefault(
                             label,
                             Account(label, account_home(state, label), binary, pool),
@@ -231,23 +320,38 @@ async def serve(state, binary):
                             raise SignInRequired()
                         async with file_lock(account.home / "credential.lock"):
                             if op == "credentials":
-                                value = None
-                                with contextlib.suppress(Exception):
-                                    candidate = await asyncio.to_thread(
-                                        read_keychain, account.home
+                                force = bool(request.get("refresh"))
+                                value = credentials_cache.get(label, stamp)
+                                if (
+                                    force
+                                    and time.monotonic() - refreshed.get(label, 0) >= 30
+                                ):
+                                    value = None
+                                if value is not None:
+                                    stats["credential_cache_hits"] += 1
+                                if (
+                                    value is None
+                                    and time.monotonic()
+                                    - max(
+                                        permission_failures.values(),
+                                        default=float("-inf"),
                                     )
-                                    part = candidate["accessToken"].split(".")[1]
-                                    expires = json.loads(
-                                        base64.urlsafe_b64decode(
-                                            part + "=" * (-len(part) % 4)
+                                    < 60
+                                ):
+                                    raise KeychainAccessRequired()
+                                if value is None and not force:
+                                    try:
+                                        candidate = await native_credentials(
+                                            account, stats
                                         )
-                                    ).get("exp", 0)
-                                    if expires > time.time() + 120 and (
-                                        not request.get("refresh")
-                                        or time.monotonic() - refreshed.get(label, 0)
-                                        < 30
-                                    ):
-                                        value = candidate
+                                        credentials_cache.put(label, stamp, candidate)
+                                        value = credentials_cache.get(label, stamp)
+                                    except KeychainAccessRequired:
+                                        raise
+                                    except RemoteError:
+                                        raise
+                                    except Exception:
+                                        pass
                                 if value is None:
                                     if request.get("refresh"):
                                         # A retained native manager can hold a refresh
@@ -261,11 +365,11 @@ async def serve(state, binary):
                                     )
                                     if not result.get("account"):
                                         raise SignInRequired()
-                                    value = await asyncio.to_thread(
-                                        read_keychain, account.home
-                                    )
+                                    value = await native_credentials(account, stats)
                                     if request.get("refresh"):
                                         refreshed[label] = time.monotonic()
+                                credentials_cache.put(label, stamp, value)
+                                permission_failures.pop(label, None)
                             elif op == "usage":
                                 value = (
                                     pool.cached(label, not_before=request.get("after"))
@@ -281,13 +385,21 @@ async def serve(state, binary):
                                     )
                                     pool.save(label, value)
                             elif op == "invalidate":
+                                credentials_cache.discard(label)
+                                permission_failures.pop(label, None)
+                                refreshed.pop(label, None)
                                 await account.close()
                                 accounts.pop(label, None)
                                 value = True
                             else:
                                 raise ValueError()
                         response = {"ok": True, "result": value}
+            except KeychainAccessRequired:
+                if account is not None:
+                    permission_failures[label] = time.monotonic()
+                response = {"ok": False, "reason": "keychain_access_required"}
             except SignInRequired:
+                credentials_cache.discard(request.get("label"))
                 if account is not None and not account_auth.required(account.home):
                     account_auth.mark_required(account.home, enrollment=stamp)
                     pool.signal("accounts")
@@ -296,6 +408,7 @@ async def serve(state, binary):
             except RemoteError as error:
                 response = {"ok": False}
                 if account is not None and account_auth.permanent(error.payload):
+                    credentials_cache.discard(label)
                     account_auth.mark_required(account.home, enrollment=stamp)
                     pool.signal("accounts")
                     pool.signal()

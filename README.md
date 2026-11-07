@@ -65,6 +65,8 @@ relay attach --takeover SESSION_ID
 Accounts show their saved email addresses. The watch view updates only when local
 status changes; it uses no model allowance. The menu bar uses an icon and opens
 at Mac login. `relay menubar --no-startup --configure-only` disables login startup.
+Opening the menu checks allowance in the background. Repeated opens share a check
+already in progress; there is no separate allowance-check button.
 Use a session's menu to switch accounts after its work finishes. Account menus can
 enable or disable future routing without stopping current tasks. Actions show
 their result, and stopped workers offer a restart.
@@ -117,6 +119,8 @@ relay menubar
 
 Accounts stay in your Mac's Keychain. Relay keeps its settings and task records
 in your private Application Support folder. Never share that folder.
+Each account has its own native helper. Valid access tokens are shared in memory
+across that account's sessions; they are never written to a plaintext cache file.
 
 ## Updates and limits
 
