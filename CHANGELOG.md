@@ -1,5 +1,12 @@
 # Changes
 
+## 0.7.8
+
+- Accept native responses up to 256 MiB, including large plugin catalogs and saved conversations with images. The previous 32 MiB bound could stop the connection reader and leave later turn submissions failing on every account.
+- Report oversized, malformed and disconnected native responses with specific, safe guidance and metadata-only diagnostics. Uncertain submissions are still reconciled without blind replay.
+- Release a disconnected native process's thread writer before resuming on its verified replacement. Preserve a review hold when a model turn was running, even if no tool was active.
+- Cover large replies, large notifications, follow-up requests on the same connection, and malformed or oversized input in transport regression tests.
+
 ## 0.7.7
 
 - Keep live session registrations when a process-start probe is temporarily unavailable.

@@ -465,6 +465,7 @@ async def _serve(state, ident, binary):
     from websockets.asyncio.server import serve as ws_serve
     from router import (
         RPC,
+        RPC_MESSAGE_LIMIT,
         Controller,
         labels,
         account_home,
@@ -662,7 +663,7 @@ async def _serve(state, ident, binary):
             "127.0.0.1",
             0,
             process_request=transport_guard(lambda: meta["token"]),
-            max_size=32 * 1024 * 1024,
+            max_size=RPC_MESSAGE_LIMIT,
         ) as server:
             port = server.sockets[0].getsockname()[1]
             meta = {

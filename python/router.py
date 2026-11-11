@@ -29,7 +29,10 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.7.7"
+VERSION = "0.7.8"
+# Native plugin catalogs include assets, and saved turns can contain images.
+# Keep the JSONL and websocket bounds aligned without allowing unbounded input.
+RPC_MESSAGE_LIMIT = 256 * 1024 * 1024
 _support = Path.home() / "Library/Application Support"
 _legacy = _support / "Codex Accounts"
 _default_state = _legacy if (_legacy / "accounts").exists() else _support / "Relay"
@@ -48,6 +51,18 @@ CONTINUE = (
 
 class RouterError(Exception):
     """A message safe to display; never include a server error or credential."""
+
+
+class BackendDisconnected(RouterError):
+    MESSAGES = {
+        "closed": "Codex backend disconnected. Reconnect to the saved session before retrying.",
+        "response_too_large": "Codex returned a response larger than Relay's 256 MiB limit. Reconnect after reducing the response size.",
+        "invalid_response": "Codex returned an invalid local response. Reconnect to the saved session before retrying.",
+    }
+
+    def __init__(self, reason="closed"):
+        self.reason = reason if reason in self.MESSAGES else "closed"
+        super().__init__(self.MESSAGES[self.reason])
 
 
 class SignInRequired(RouterError):
@@ -222,6 +237,7 @@ class RPC:
         self.sequence = 0
         self.writer_lock = asyncio.Lock()
         self.handlers = set()
+        self.read_failure = "closed"
         self.reader = asyncio.create_task(self.read_loop())
         self.startup_guard = None
 
@@ -256,7 +272,7 @@ class RPC:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
-                limit=32 * 1024 * 1024,
+                limit=RPC_MESSAGE_LIMIT,
             )
             rpc = cls(proc, handler)
             rpc.startup_guard = guard
@@ -273,15 +289,11 @@ class RPC:
                 )
                 await self.proc.stdin.drain()
             except (ConnectionError, OSError):
-                raise RouterError(
-                    "Codex backend disconnected; resume the saved thread after restarting the wrapper."
-                ) from None
+                raise BackendDisconnected(self.read_failure) from None
 
     async def call(self, method, params=None, timeout=45):
         if self.reader.done():
-            raise RouterError(
-                "Codex backend disconnected; resume the saved thread after restarting the wrapper."
-            )
+            raise BackendDisconnected(self.read_failure)
         self.sequence += 1
         request_id = f"accounts-{self.sequence}"
         future = asyncio.get_running_loop().create_future()
@@ -322,8 +334,23 @@ class RPC:
 
     async def read_loop(self):
         try:
-            while raw := await self.proc.stdout.readline():
-                message = json.loads(raw)
+            while True:
+                try:
+                    raw = await self.proc.stdout.readline()
+                except (ValueError, asyncio.LimitOverrunError):
+                    self.read_failure = "response_too_large"
+                    break
+                if not raw:
+                    break
+                try:
+                    message = json.loads(raw)
+                    if not isinstance(message, dict) or not isinstance(
+                        message.get("id"), (str, int, type(None))
+                    ):
+                        raise ValueError()
+                except (ValueError, UnicodeError):
+                    self.read_failure = "invalid_response"
+                    break
                 if "method" not in message and message.get("id") in self.pending:
                     future = self.pending[message["id"]]
                     if not future.done():
@@ -335,12 +362,12 @@ class RPC:
                     task = asyncio.create_task(self.handler(message))
                     self.handlers.add(task)
                     task.add_done_callback(self.handlers.discard)
-        except (ValueError, OSError, asyncio.LimitOverrunError):
+        except OSError:
             pass
         finally:
             for future in list(self.pending.values()):
                 if not future.done():
-                    future.set_exception(RouterError("Codex backend disconnected."))
+                    future.set_exception(BackendDisconnected(self.read_failure))
 
     async def close(self):
         if self.proc.returncode is None:
@@ -919,7 +946,9 @@ class Controller:
             if not self.backend_disconnected():
                 return
             self.note("restarting")
-            in_flight = bool(self.active_items or self.server_requests)
+            in_flight = bool(
+                self.active_threads or self.active_items or self.server_requests
+            )
             old = self.backend
             old_auth_account = self.auth_account
             candidate = None
@@ -938,6 +967,10 @@ class Controller:
                     await candidate.close()
                 self.note("backend_restart_failed", reason="startup_or_login_failed")
                 return
+            # A broken reader can leave the native process alive and holding
+            # the saved thread's writer lease. Release it before resuming on
+            # the verified replacement, not after that resume has conflicted.
+            await old.close()
             self.active_threads.clear()
             self.server_requests.clear()
             self.pending_server_requests.clear()
@@ -983,7 +1016,6 @@ class Controller:
                         self.recovery = asyncio.create_task(
                             self.restore_recovery(thread, persisted)
                         )
-            await old.close()
             if self.paused_uncertain:
                 self.note("needs_attention", reason="backend_restored_review_required")
             else:
@@ -2105,13 +2137,18 @@ class Controller:
                     self.recovery = asyncio.create_task(
                         self.recover(thread, self.user_generation, kind)
                     )
-        except (RouterError, asyncio.TimeoutError):
+        except (RouterError, asyncio.TimeoutError) as error:
+            detail = "Codex request failed. No automatic retry of this action was made."
+            if isinstance(error, BackendDisconnected):
+                detail = str(error) + " No automatic retry of this action was made."
+                if self.pool:
+                    self.pool.record("backend_disconnected", reason=error.reason)
             await self.emit(
                 {
                     "id": request_id,
                     "error": {
                         "code": -32000,
-                        "message": "Codex request failed. No automatic retry of this action was made.",
+                        "message": detail,
                     },
                 }
             )

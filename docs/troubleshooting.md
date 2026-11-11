@@ -36,6 +36,16 @@ a bug. Do not post auth files, tokens, connection files, or private task prompts
 Long runs, physical sleep/wake cycles, real revoked logins, and future Codex
 versions need broader live testing. The tests do not remove those limits.
 
+**Starting a turn fails on multiple accounts with “Codex request failed.”**
+
+Update to Relay 0.7.8 or newer, then relaunch the affected Relay session. Earlier
+versions stopped reading native responses above 32 MiB. Plugin catalogs with
+assets and long conversations with images can exceed that size, leaving the
+terminal visible while later requests fail. Relay now accepts responses up to
+256 MiB and reports a specific connection error if that bound is exceeded or a
+response is malformed. Uncertain submissions are still checked before any retry;
+changing accounts does not repair a broken local connection.
+
 **The dashboard repeats or an email is missing.**
 
 Check `relay --version` and update Relay. Watch now prints only meaningful changes
