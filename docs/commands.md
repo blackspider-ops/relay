@@ -40,6 +40,8 @@ relay account priority personal 10
 relay account cap personal 2
 relay account models personal YOUR_MODEL
 relay account reauth personal
+relay signout you@example.com
+relay account signout personal
 relay account reset personal --yes
 relay account remove personal
 ```
@@ -48,7 +50,12 @@ Accounts display their saved email addresses. `account identify` fills in emails
 for earlier installations without another sign-in. Commands accept an account's
 label, unique email, or chosen display name. Renaming keeps the login usable.
 A session cap of zero means unlimited. Removing an account retains its login
-unless you request `--revoke`.
+unless you request `--revoke`. **Sign out** in the account menu, `relay signout EMAIL`,
+or `relay account signout ACCOUNT` clears that account's saved login and removes it
+from Relay. `logout` is an alias for `signout`. Saved conversations and other
+accounts' logins are kept. If it has live sessions, switch them to another account
+first, then sign out. You can sign out the last account and add one later with
+`relay add LABEL`.
 
 The account menu shows **Usage resets available** and **Use available reset…**
 when Codex reports an earned reset. It is enabled only when weekly allowance is
@@ -145,7 +152,7 @@ until the menu is opened; action progress remains until the action finishes.
 Starting another action replaces its previous result. Stopped workers offer
 Restart; restarting retains any review hold.
 
-Account menus can disable or enable future routing. Disabling an account does not
+Account menus can sign out unused accounts or disable or enable future routing. Disabling an account does not
 interrupt work already using it. The account chooser marks the current account
 and disables accounts excluded by their saved routing/model settings.
 It opens at Mac login after `relay menubar`; disable that in its menu or with

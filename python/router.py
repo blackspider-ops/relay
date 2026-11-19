@@ -29,7 +29,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.7.8"
+VERSION = "0.7.9"
 # Native plugin catalogs include assets, and saved turns can contain images.
 # Keep the JSONL and websocket bounds aligned without allowing unbounded input.
 RPC_MESSAGE_LIMIT = 256 * 1024 * 1024
@@ -2663,7 +2663,8 @@ def selected_binary(args, state):
         return None
     if (
         args.command == "account"
-        and args.action not in {"add", "reauth", "reset"}
+        and args.action
+        not in {"add", "reauth", "reset", "signout", "logout", "sign-out"}
         and not getattr(args, "revoke", False)
     ):
         return None

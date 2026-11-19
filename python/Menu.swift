@@ -296,6 +296,10 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let enabled = account["enabled"] as? Bool ?? true
                 action(enabled ? "Disable for future routing" : "Enable for routing", args: ["account", enabled ? "disable" : "enable", id], into: submenu)
                 text("Current tasks keep running.", into: submenu)
+                submenu.addItem(.separator())
+                let signout = action("Sign out", args: ["account", "signout", id], into: submenu)
+                signout.isEnabled = !actionRunning && assigned.isEmpty && !(account["maintenance"] as? Bool ?? false)
+                signout.toolTip = assigned.isEmpty ? "Remove this account's saved login from Relay. Saved conversations are kept." : "Switch its sessions to another account before signing out."
             }
             let entry = NSMenuItem(title: "\(name)\(inUse) · \(label)", action: nil, keyEquivalent: "")
             entry.state = assigned.isEmpty ? .off : .on
@@ -455,7 +459,12 @@ final class MenuController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "unpause": return "Recovery resumed."
         case "retry": return "Task allowed to continue."
         case "restart": return "Session restarted."
-        case "account": return args.dropFirst().first == "disable" ? "Account disabled for future routing." : "Account enabled for routing."
+        case "account":
+            switch args.dropFirst().first {
+            case "signout", "logout", "sign-out": return "Account signed out. Saved conversations are kept."
+            case "disable": return "Account disabled for future routing."
+            default: return "Account enabled for routing."
+            }
         default: return "Change applied."
         }
     }
@@ -522,6 +531,14 @@ if CommandLine.arguments.contains("--self-check") {
     let activeMarker = controls.items.first { $0.identifier?.rawValue == "account:one" }
     let currentChoice = findAction(["switch", "live", "--account", "one", "--wait"], in: controls)
     let correctMarker = activeMarker?.state == .on && activeMarker?.title.contains("In use") == true && currentChoice?.title.contains("Current") == true
+    let signoutArgs = ["account", "signout", "two"]
+    let canSignOut = findAction(signoutArgs, in: controls)?.isEnabled == true && findAction(["account", "signout", "one"], in: controls)?.isEnabled == false
+    controller.actionRunning = true
+    let signoutBusy = findAction(signoutArgs, in: controller.makeMenu())?.isEnabled == false
+    controller.actionRunning = false
+    let signoutMessage = MenuController.successMessage(signoutArgs) == "Account signed out. Saved conversations are kept."
+    print("Sign-out available only for unused accounts: \(canSignOut && signoutBusy && signoutMessage)")
+    if !canSignOut || !signoutBusy || !signoutMessage { exit(1) }
     let originalSessions = controller.current["sessions"]
     controller.current["sessions"] = [["id": "a", "account": "one", "running": true], ["id": "b", "account": "one", "running": true], ["id": "c", "account": "two", "running": true], ["id": "d", "account": "off", "running": false]]
     let multiple = controller.makeMenu()

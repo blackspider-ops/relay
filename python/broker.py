@@ -139,11 +139,13 @@ async def exchange(state, request, timeout=60):
     return await asyncio.wait_for(call(), timeout)
 
 
-async def ensure(state, binary):
+async def ensure(state, binary, *, current=False):
     async with file_lock(state / "broker-start.lock"):
         try:
             running = await exchange(state, {"op": "ping"}, 3)
-            if running.get("protocol", 1) == PROTOCOL_VERSION:
+            if running.get("protocol", 1) == PROTOCOL_VERSION and (
+                not current or running.get("build") == SOURCE_REVISION
+            ):
                 return
             await exchange(state, {"op": "stop"}, 3)
             for _ in range(50):
@@ -173,8 +175,11 @@ async def ensure(state, binary):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             try:
-                await exchange(state, {"op": "ping"}, 2)
-                return
+                running = await exchange(state, {"op": "ping"}, 2)
+                if running.get("protocol", 1) == PROTOCOL_VERSION and (
+                    not current or running.get("build") == SOURCE_REVISION
+                ):
+                    return
             except (OSError, ValueError, RuntimeError, asyncio.TimeoutError):
                 await asyncio.sleep(0.1)
         raise RuntimeError("Local credential coordinator did not start")
@@ -301,6 +306,13 @@ async def serve(state, binary):
                         raise ValueError()
                     lock = locks.setdefault(label, asyncio.Lock())
                     async with lock:
+                        # Maintenance may start while this request is queued.
+                        # Never recreate a helper or cached token after sign-out.
+                        if label not in labels(state) or (
+                            pool.options(label).get("maintenance")
+                            and op != "invalidate"
+                        ):
+                            raise ValueError()
                         # Enrollment writes a new generation marker and invalidates
                         # this authority before any cached manager is reused.
                         marker = account_home(state, label) / "enrolled"

@@ -316,12 +316,61 @@ async def manage(args, state, binary):
         return await _manage(args, state, binary)
 
 
+async def sign_out(home, state, label, binary):
+    """Clear the shared helper before signing out this isolated Codex home."""
+    from router import RouterError, clean_env
+    import broker
+
+    try:
+        if broker.paths(state)[1].exists():
+            # Older workers may share a compatible coordinator that predates
+            # the queued-read sign-out guard. Upgrade that helper only.
+            await broker.ensure(state, binary, current=True)
+        await broker.exchange(state, {"op": "invalidate", "label": label}, 60)
+    except (FileNotFoundError, ConnectionRefusedError):
+        pass  # A stopped coordinator has no reusable credentials in memory.
+    except (OSError, RuntimeError, ValueError, asyncio.TimeoutError):
+        raise RouterError(
+            "Could not clear this account's cached login. Try signing out again."
+        ) from None
+    async with file_lock(home / "credential.lock"):
+        try:
+            process = await asyncio.create_subprocess_exec(
+                binary,
+                "logout",
+                "-c",
+                'cli_auth_credentials_store="keyring"',
+                "-c",
+                "features.secret_auth_storage=false",
+                env=clean_env(home),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            raise RouterError(
+                "Codex could not start sign-out. The account entry was kept; check your Codex installation."
+            ) from None
+        try:
+            code = await asyncio.wait_for(process.wait(), 60)
+        except BaseException:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
+        if code:
+            raise RouterError(
+                "Sign-out was not confirmed. The account entry was kept; try again."
+            )
+
+
 async def _manage(args, state, binary):
-    from router import labels, account_home, add_account, RouterError, clean_env
+    from router import labels, account_home, add_account, RouterError
     import broker
 
     pool = Pool(state)
     try:
+        if args.action in {"logout", "sign-out"}:
+            args.action = "signout"
         label = resolve_label(state, args.label) if args.action != "add" else args.label
         if args.action == "reset":
             import resets
@@ -365,35 +414,39 @@ async def _manage(args, state, binary):
                 "This account is assigned to a live session. Switch those sessions to another account first; other accounts can keep running."
             )
         try:
+            signing_out = args.action == "signout" or (
+                args.action == "remove" and args.revoke
+            )
+            if signing_out:
+                try:
+                    await sign_out(home, state, label, binary)
+                except asyncio.TimeoutError:
+                    raise RouterError(
+                        "Sign-out timed out. The account entry was kept; try again."
+                    ) from None
             with contextlib.suppress(Exception):
-                await broker.exchange(state, {"op": "invalidate", "label": label}, 15)
+                if not signing_out:
+                    await broker.exchange(
+                        state, {"op": "invalidate", "label": label}, 15
+                    )
             async with file_lock(home / "credential.lock"):
                 if args.action in {"add", "reauth"}:
                     args.label = label
                     await asyncio.to_thread(add_account, args, state, binary)
-                elif args.action == "remove":
-                    if args.revoke:
-                        result = await asyncio.create_subprocess_exec(
-                            binary,
-                            "logout",
-                            env=clean_env(home),
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL,
-                        )
-                        if await result.wait():
-                            raise RouterError(
-                                "Native sign-out failed; account was retained."
-                            )
+                elif args.action in {"remove", "signout"}:
                     marker = home / "enrolled"
                     if marker.exists():
                         marker.rename(home / "enrolled.removed")
                     pool.reset_identity(label)
                     pool.set_options(label, enabled=False)
+                    from account_auth import clear
+
+                    clear(home)
                     print(
                         f"{label}: removed from routing. "
                         + (
-                            "Native login revoked."
-                            if args.revoke
+                            "Signed out of Relay. Saved conversations are kept."
+                            if signing_out
                             else "Keychain login retained; use add to enroll again."
                         )
                     )
@@ -658,6 +711,19 @@ def add_parsers(sub):
     account = sub.add_parser("account", help="Manage any number of enrolled accounts")
     child = account.add_subparsers(dest="action", required=True)
     child.add_parser("identify", help="Fill in account emails from saved local logins")
+    signout = child.add_parser(
+        "signout",
+        aliases=["logout", "sign-out"],
+        help="Sign out and remove an account from Relay; keep saved conversations",
+    )
+    signout.add_argument("label", help="Account email, name or label")
+    signout = sub.add_parser(
+        "signout",
+        aliases=["logout"],
+        help="Sign out one Relay account by email, name or label",
+    )
+    signout.add_argument("label", help="Account email, name or label")
+    signout.set_defaults(action="signout")
     for action in [
         "add",
         "reauth",
@@ -842,6 +908,8 @@ async def dispatch(args, state, binary):
                 f"Identified {await asyncio.to_thread(identify_accounts, state)} saved accounts."
             )
             return 0
+        return await manage(args, state, binary)
+    if args.command in {"signout", "logout"}:
         return await manage(args, state, binary)
     if args.command == "config":
         if args.key:

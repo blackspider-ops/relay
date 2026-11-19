@@ -1,5 +1,11 @@
 # Changes
 
+## 0.7.9
+
+- Add `relay signout EMAIL` and `relay account signout ACCOUNT`, with `logout` aliases, to clear one account's saved login and remove it from Relay while keeping saved conversations.
+- Add Sign out to each account's menu. Accounts with live sessions stay protected until those sessions switch elsewhere.
+- Clear the account's shared credential cache before native sign-out, and prevent queued helper requests from recreating credentials during removal. Failed or unconfirmed sign-out keeps the account entry for retry.
+
 ## 0.7.8
 
 - Accept native responses up to 256 MiB, including large plugin catalogs and saved conversations with images. The previous 32 MiB bound could stop the connection reader and leave later turn submissions failing on every account.

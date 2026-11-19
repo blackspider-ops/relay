@@ -110,6 +110,7 @@ conversations across several terminals.
 ```sh
 relay add personal
 relay account disable personal
+relay signout you@example.com
 relay pause SESSION_ID
 relay unpause SESSION_ID
 relay retry SESSION_ID
@@ -121,6 +122,10 @@ Accounts stay in your Mac's Keychain. Relay keeps its settings and task records
 in your private Application Support folder. Never share that folder.
 Each account has its own native helper. Valid access tokens are shared in memory
 across that account's sessions; they are never written to a plaintext cache file.
+
+To remove an account you no longer use, open its menu and choose **Sign out**, or
+run `relay signout EMAIL`. Switch any sessions using it to another account first.
+Sign-out clears that Relay account's saved login and keeps your conversations.
 
 ## Updates and limits
 
