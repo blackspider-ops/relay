@@ -392,9 +392,37 @@ async def serve(state, binary):
                                 )
                                 if value is None:
                                     await account.start()
-                                    value = await account.rpc.call(
-                                        "account/rateLimits/read"
-                                    )
+                                    try:
+                                        value = await account.rpc.call(
+                                            "account/rateLimits/read"
+                                        )
+                                    except RemoteError as error:
+                                        if not account_auth.usage_unauthorized(
+                                            error.payload
+                                        ):
+                                            raise
+                                        # A stale access token is not evidence of
+                                        # exhausted allowance. Reload the grant,
+                                        # refresh once, then retry this read only.
+                                        credentials_cache.discard(label)
+                                        refreshed.pop(label, None)
+                                        await account.close()
+                                        await account.start()
+                                        auth = await account.rpc.call(
+                                            "account/read", {"refreshToken": True}
+                                        )
+                                        if not auth.get("account"):
+                                            raise SignInRequired()
+                                        try:
+                                            value = await account.rpc.call(
+                                                "account/rateLimits/read"
+                                            )
+                                        except RemoteError as retry_error:
+                                            if account_auth.usage_unauthorized(
+                                                retry_error.payload
+                                            ):
+                                                raise SignInRequired() from None
+                                            raise
                                     pool.save(label, value)
                             elif op == "invalidate":
                                 credentials_cache.discard(label)

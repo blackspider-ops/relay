@@ -1,6 +1,7 @@
 """Account login health metadata. Never stores credentials or server payloads."""
 
 import json
+import re
 import time
 
 from settings import atomic_json
@@ -45,4 +46,15 @@ def permanent(payload):
         payload.get("code") == -32603
         and isinstance(payload.get("message"), str)
         and payload.get("message") in PERMANENT_REFRESH_MESSAGES
+    )
+
+
+def usage_unauthorized(payload):
+    """Recognize the native usage endpoint's auth envelope, not arbitrary 401 text."""
+    message = payload.get("message")
+    return (
+        payload.get("code") == -32603
+        and isinstance(message, str)
+        and message.startswith("failed to fetch codex rate limits:")
+        and re.search(r"\bfailed: 401 Unauthorized(?:;|$)", message) is not None
     )

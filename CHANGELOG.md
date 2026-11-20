@@ -1,5 +1,11 @@
 # Changes
 
+## 0.7.10
+
+- Refresh an account's native login once when its allowance endpoint rejects an expired or revoked access token. Retry the allowance read after refresh; require sign-in if refresh is revoked or the new login remains unauthorized.
+- Keep explicit sign-in failures out of temporary availability and reset scheduling. Disabled accounts no longer contribute retry deadlines.
+- Preserve the last successful allowance reading with the existing Sign-in required label instead of suggesting remaining allowance proves that a login still works.
+
 ## 0.7.9
 
 - Add `relay signout EMAIL` and `relay account signout ACCOUNT`, with `logout` aliases, to clear one account's saved login and remove it from Relay while keeping saved conversations.

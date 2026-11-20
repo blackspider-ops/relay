@@ -20,6 +20,149 @@ from test_services import wait_for
 
 
 class LoginHealthTests(unittest.IsolatedAsyncioTestCase):
+    def test_usage_auth_classifier_is_specific_to_native_endpoint_and_status(self):
+        message = "failed to fetch codex rate limits: GET https://chatgpt.com/backend-api/wham/usage failed: 401 Unauthorized; body=PRIVATE"
+        self.assertTrue(
+            account_auth.usage_unauthorized({"code": -32603, "message": message})
+        )
+        for payload in (
+            {"code": -32603, "message": "arbitrary 401 Unauthorized"},
+            {"code": -32600, "message": message},
+            {
+                "code": -32603,
+                "message": message.replace("401 Unauthorized", "403 Forbidden"),
+            },
+            {
+                "code": -32603,
+                "message": message.replace(
+                    "401 Unauthorized", "500 Internal Server Error"
+                ),
+            },
+        ):
+            self.assertFalse(account_auth.usage_unauthorized(payload))
+
+    async def test_usage_401_refreshes_once_and_only_marks_login_when_refresh_fails(
+        self,
+    ):
+        unauthorized = {
+            "code": -32603,
+            "message": "failed to fetch codex rate limits: GET usage failed: 401 Unauthorized; body=PRIVATE",
+        }
+        for outcome in ("recovered", "revoked", "still_unauthorized", "network"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as folder:
+                state = Path(folder)
+                home = self.home(state)
+                calls = []
+
+                class Account:
+                    def __init__(self, label, home, binary, pool):
+                        self.home = home
+                        self.rpc = self
+
+                    async def start(self):
+                        pass
+
+                    async def close(self):
+                        pass
+
+                    async def call(self, method, params=None):
+                        calls.append((method, params))
+                        if method == "account/read":
+                            if outcome == "revoked":
+                                raise RemoteError(
+                                    {
+                                        "code": -32603,
+                                        "message": next(
+                                            iter(
+                                                account_auth.PERMANENT_REFRESH_MESSAGES
+                                            )
+                                        ),
+                                    }
+                                )
+                            if outcome == "network":
+                                raise RemoteError(
+                                    {"code": -32603, "message": "network unavailable"}
+                                )
+                            return {"account": {"type": "chatgpt"}}
+                        reads = sum(m == "account/rateLimits/read" for m, _ in calls)
+                        if reads == 1 or outcome == "still_unauthorized":
+                            raise RemoteError(unauthorized)
+                        return {"ordinaryUsageAllowed": True}
+
+                with patch("router.Account", Account):
+                    server = asyncio.create_task(broker.serve(state, "unused"))
+                    try:
+                        await wait_for(lambda: broker.paths(state)[1].exists())
+                        if outcome == "recovered":
+                            result = await broker.exchange(
+                                state, {"op": "usage", "label": "one", "force": True}
+                            )
+                            self.assertTrue(result["ordinaryUsageAllowed"])
+                        else:
+                            with self.assertRaises(broker.CoordinatorError) as caught:
+                                await broker.exchange(
+                                    state,
+                                    {"op": "usage", "label": "one", "force": True},
+                                )
+                            self.assertEqual(
+                                caught.exception.reason,
+                                "sign_in_required" if outcome != "network" else None,
+                            )
+                        self.assertEqual(sum(m == "account/read" for m, _ in calls), 1)
+                        self.assertIn(("account/read", {"refreshToken": True}), calls)
+                        self.assertEqual(
+                            account_auth.required(home),
+                            outcome in {"revoked", "still_unauthorized"},
+                        )
+                        self.assertLessEqual(
+                            sum(m == "account/rateLimits/read" for m, _ in calls), 2
+                        )
+                    finally:
+                        await broker.exchange(state, {"op": "stop"})
+                        await asyncio.wait_for(server, 3)
+
+    async def test_selection_does_not_turn_signin_required_into_unavailable_block(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            self.home(state)
+            pool = Pool(state)
+            account = FakeAccount("one")
+
+            async def usage(force=False):
+                account_auth.mark_required(state / "accounts/one")
+                raise SignInRequired()
+
+            account.usage = usage
+            controller = Controller([account], FakeBackend(), pool=pool)
+            try:
+                index, deadline = await controller.choose()
+                self.assertIsNone(index)
+                self.assertEqual(pool.deadline("one"), 0)
+                self.assertEqual(
+                    controller.waiting_accounts(deadline)[0], "waiting_for_accounts"
+                )
+            finally:
+                pool.close()
+
+    async def test_disabled_account_does_not_set_earliest_retry_deadline(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state = Path(folder)
+            self.home(state, "off")
+            self.home(state, "on")
+            pool = Pool(state)
+            try:
+                pool.set_options("off", enabled=False)
+                pool.mark("off", None, reason="unavailable", delay=5)
+                on_deadline = pool.mark("on", None, reason="unavailable", delay=100)
+                controller = Controller(
+                    [FakeAccount("off"), FakeAccount("on")], FakeBackend(), pool=pool
+                )
+                index, deadline = await controller.choose()
+                self.assertIsNone(index)
+                self.assertEqual(deadline, on_deadline)
+            finally:
+                pool.close()
+
     def test_real_cli_management_errors_are_handled_without_tracebacks(self):
         with tempfile.TemporaryDirectory() as folder:
             result = subprocess.run(

@@ -29,7 +29,7 @@ from pool import Pool, blocked, reset_time, failure_kind, file_lock
 from launch import translate, RESUME_FIELDS
 import settings
 
-VERSION = "0.7.9"
+VERSION = "0.7.10"
 # Native plugin catalogs include assets, and saved turns can contain images.
 # Keep the JSONL and websocket bounds aligned without allowing unbounded input.
 RPC_MESSAGE_LIMIT = 256 * 1024 * 1024
@@ -1667,10 +1667,6 @@ class Controller:
 
                 if required(account_home(self.pool.state, self.accounts[index].label)):
                     continue
-            deadline = self.deadline(index, model)
-            if deadline > self.clock():
-                deadlines.append(deadline)
-                continue
             account = self.accounts[index]
             options = self.pool.options(account.label) if self.pool else {}
             if (
@@ -1683,6 +1679,10 @@ class Controller:
                 continue
             try:
                 # A reset timestamp authorizes a new check, not usage itself.
+                deadline = self.deadline(index, model)
+                if deadline > self.clock():
+                    deadlines.append(deadline)
+                    continue
                 snapshot = await account.usage(force=bool(deadline))
                 if limited(snapshot, model):
                     if self.pool:
@@ -1711,6 +1711,10 @@ class Controller:
                     deadlines.append(self.clock() + 2)
                     continue
                 return index, 0
+            except SignInRequired:
+                # The coordinator records login health and wakes observers.
+                # Do not turn an explicit sign-in requirement into a reset wait.
+                continue
             except (RouterError, asyncio.TimeoutError):
                 deadlines.append(await self.mark(index, model, "unavailable"))
         return None, min(deadlines, default=self.clock() + self.interval)

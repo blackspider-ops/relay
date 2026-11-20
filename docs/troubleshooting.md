@@ -79,6 +79,12 @@ first. A revoked login cannot be repaired by retrying the same token.
 
 **An account shows allowance remaining but switching to it fails.**
 
+Update to Relay 0.7.10 or newer. If the allowance endpoint rejects its login,
+Relay refreshes native authentication once and retries that read. A revoked
+refresh or repeated unauthorized response marks the account Sign-in required.
+Run `relay account reauth EMAIL` and choose that account in the browser. Its
+cached percentages describe the last successful check, not current login health.
+
 Allowance and login health are separate. With Relay 0.7.6 or newer, a login that
 Codex reports as expired or revoked is labelled “Sign-in required” in the menu
 and dashboard. Its percentages are the last successful allowance reading. Copy
